@@ -7,7 +7,7 @@
 window._META = {
   repo:   "AdJuSingh/copilot-workflow-artifacts",  // GitHub owner/repo
   clones: { count: 0, unique: 0, asOf: "Mar 2026" }
-  // count/unique/asOf are updated automatically — do not edit by hand
+  // count/unique/asOf are updated automatically -- do not edit by hand
 };
 window._WORKFLOWS = [
   {
