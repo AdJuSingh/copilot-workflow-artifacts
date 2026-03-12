@@ -1,0 +1,11 @@
+name: Update dependencies
+
+on:
+  schedule:
+    - cron: "0 5 * * 1" # Every Monday at 5am UTC
+  workflow_dispatch:
+
+jobs:
+  update-dependencies:
+    uses: AIBrakesEngineering/example-workflows/.github/workflows/update-dependencies.yaml@main
+    secrets: inherit

@@ -1,0 +1,19 @@
+# Project Configuration
+# This file declares which platform domain and layer this project uses.
+# The VS Code extension uses this to sync the correct artifacts.
+
+project:
+  name: "project-template"
+  description: "Template for new orchestrated workflow projects"
+
+# Which platform artifacts this project inherits from
+platform:
+  domain: "vm-bs"          # vm-bs | vm-oss | vm-st
+  layers:
+    - "hsw"                # asw | hsw | isw
+  # isw_subdomains:        # uncomment if layer includes isw
+  #   - "dcom"
+  #   - "dsm"
+  #   - "net"
+
+# Shared artifacts are always included from platform/_shared/

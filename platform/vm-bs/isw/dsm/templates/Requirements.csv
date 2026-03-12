@@ -1,0 +1,127 @@
+﻿SWFS_1,"General Requirements to HydraulicUndervoltage1
+Failure: HydraulicUndervoltage1
+Failure Set and Reset Conditions: 
+If Voltage drops below HydraulicSupply Undervoltage_Threshold and vehicle speed is above StandstillThreshold for 1000ms, HydraulicUndervoltage monitorings gets logged.
+If vehicle speed is below the Standstill Threshold and if any of the following conditions are fulfilled, then Hydraulic Undervoltage monitoring gets logged:
+-- voltage below 9.6V, and if engine is running including Start/Stop ( if Standstill functions supported)
+-- voltage below 9.6V, and if engine is off (if APB or Partial braking suppported)
+
+When HydraulicUndervoltage1 monitoring is logged and if the voltage goes above Hydraulic Supply Undervoltage_Threshold + Hysterisis for 500ms, then the monitoring gets healed.
+Hydraulic Supply Undervoltage_Threshold:  9.6V
+Standstill Threshold: 10kmph
+
+Monitoring: FW_HydraulicUndervoltage1
+
+System strategy:  ESPBase_EbdPumpless, AEB_Off, HHC = Off, TargetStateHBA = Off.
+Customer: CHR
+Software group: DCOM
+Product: IPB
+Failure condition          : ECU supply voltage < 9.6V
+Operation cycle           : Power cycle
+Debouncer Type           : Counter based
+DTC_Set_Conditions  : SW is Running.
+Failure name                 : FW_HydraulicUndervoltage1
+Detection Time             : 1000ms
+Recovery Time              : 500ms
+Failure type                    : Curable in current Operation Cycle.
+DTC                                  : 0x123456
+DTC name                      : Hydraulic undervoltage failure
+DTC severity                  : Immediately
+Warning bit indicator      : True
+Node name                     : Node_VoltageHandler1
+Parent Node                   : Node_Ecu
+Node Priority: 100
+Restore to next Operation Cyle: Yes
+Curable in current Operation Cycle: No
+Import from ASCET: No
+Export to ASCET: No
+Task cycle: 10ms
+"
+SWFS_2,"General Requirements to HydraulicUndervoltage2
+Failure: HydraulicUndervoltage2
+Failure Set and Reset Conditions: 
+If Voltage drops below HydraulicSupply Undervoltage_Threshold and vehicle speed is above StandstillThreshold for 100ms, HydraulicUndervoltage monitorings gets logged.
+If vehicle speed is below the Standstill Threshold and if any of the following conditions are fulfilled, then Hydraulic Undervoltage monitoring gets logged:
+-- voltage below 8.6V, and if engine is running including Start/Stop ( if Standstill functions supported)
+-- voltage below 8.6V, and if engine is off (if APB or Partial braking suppported)
+
+When HydraulicUndervoltag2 monitoring is logged and if the voltage goes above Hydraulic Supply Undervoltage_Threshold + Hysterisis for 50ms, then the monitoring gets healed.
+Hydraulic Supply Undervoltage_Threshold:  8.6V
+Standstill Threshold: 10kmph
+
+Monitoring: FW_HydraulicUndervoltage2
+
+System strategy:  ESPBase_EbdPumpless, AEB_Off, HHC = Off, TargetStateHBA = Off.
+Customer: CHR
+Software group: DCOM
+Product: IPB
+Failure condition          : ECU supply voltage < 8.6V
+Operation cycle           : Power cycle
+Debouncer Type           : Counter based
+DTC_Set_Conditions  : SW is Running.
+Failure name                 : FW_HydraulicUndervoltage2
+Detection Time             : 100ms
+Recovery Time              : 50ms
+Failure type                    : Curable in current Operation Cycle.
+DTC                                  : 0x123456
+DTC name                      : Hydraulic undervoltage failure
+DTC severity                  : Immediately
+Warning bit indicator      : True
+Node name                     : Node_VoltageHandler1
+Parent Node                   : Node_Ecu
+Node Priority:  90
+Restore to next Operation Cyle: Yes
+Curable in current Operation Cycle: No
+Import from ASCET: No
+Export to ASCET: No
+Task cycle: 10ms"
+SWFS_3,"General Requirements to HydraulicUndervoltage3
+Failure: HydraulicUndervoltage3
+Failure Set and Reset Conditions: 
+If Voltage drops below HydraulicSupply Undervoltage_Threshold and vehicle speed is above StandstillThreshold for 100ms, HydraulicUndervoltage monitorings gets logged.
+If vehicle speed is below the Standstill Threshold and if any of the following conditions are fulfilled, then Hydraulic Undervoltage monitoring gets logged:
+-- voltage below 7.6V, and if engine is running including Start/Stop ( if Standstill functions supported)
+-- voltage below 7.6V, and if engine is off (if APB or Partial braking suppported)
+
+When HydraulicUndervoltage3 monitoring is logged and if the voltage goes above Hydraulic Supply Undervoltage_Threshold + Hysterisis for 50ms, then the monitoring gets healed.
+Hydraulic Supply Undervoltage_Threshold:  7.6V
+Standstill Threshold: 10kmph
+
+Monitoring: FW_HydraulicUndervoltage3
+
+System strategy:  ESPBase_EbdPumpless, AEB_Off, HHC = Off, TargetStateHBA = Off.
+Customer: CHR
+Software group: DCOM
+Product: IPB
+Failure condition          : ECU supply voltage < 7.6V
+Operation cycle           : Power cycle
+Debouncer Type           : Counter based
+DTC_Set_Conditions  : SW is Running.
+Failure name                 : FW_HydraulicUndervoltage3
+Detection Time             : 100ms
+Recovery Time              : 50ms
+Failure type                    : Curable in current Operation Cycle.
+DTC                                  : 0x123456
+DTC name                      : Hydraulic undervoltage failure
+DTC severity                  : Immediately
+Warning bit indicator      : True
+DTC Attribute:                DTCAttribute_CHR_NonOBD
+Node name                     : Node_VoltageHandler1
+Parent Node                   : Node_Ecu
+Node Priority:  80
+Restore to next Operation Cyle: Yes
+Curable in current Operation Cycle: No
+Import from ASCET: No
+Export to ASCET: No
+Task cycle: 10ms"
+SWCS_1,"General Requirements to Configure DTCAttribute_CHR_NonOBD
+DTC kind: All DTCs
+Freeze Frame Class: DemFreezeFrameClass_RBAPLCUST
+Extended Data Class: DemExtendedDataClass_RB
+Number of freeze frame records: 2
+Failure cycle counter threshold: 1
+Aging cycle counter threshold: 40
+Dem DTC Priority: 255
+DTC event destination: Primary memory
+Customer: CHR
+Product: IPB"

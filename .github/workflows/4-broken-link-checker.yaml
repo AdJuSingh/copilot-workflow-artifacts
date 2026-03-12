@@ -1,0 +1,34 @@
+name: "4 · Broken Link Checker"
+
+# Checks that every file: reference inside docs/dashboard/workflows.js
+# resolves to an actual .prompt.md file somewhere under platform/.
+# Fails the build if any reference is dangling.
+
+on:
+  pull_request:
+    paths:
+      - "docs/dashboard/workflows.js"
+      - "platform/**/*.prompt.md"
+  push:
+    branches: [main]
+    paths:
+      - "docs/dashboard/workflows.js"
+      - "platform/**/*.prompt.md"
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Check file references in workflows.js
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check for broken references
+        run: python validations/scripts/check-broken-links.py

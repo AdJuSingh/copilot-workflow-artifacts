@@ -1,0 +1,1084 @@
+/// <name>Complete DTC Database Update Workflow</name>
+/// <version>1.0</version>
+/// <author>Jayasri Masi Nanjappan</author>
+/// <description>
+/// Executes all 4 DTC database update steps in a single sequential workflow:
+/// 1. Create/update DTC entries
+/// 2. Create/update DTC attributes
+/// 3. Link DTC attributes to DTCs
+/// 4. Link failure words to DTCs
+/// 
+/// Environment variables (all 4 must be set):
+/// - DIAMANT_DTC_INPUT_FILE: Path to DTC_Input.txt
+/// - DIAMANT_DTCATTR_INPUT_FILE: Path to DTCAttribute_Input.txt
+/// - DIAMANT_DTCATTRLINK_INPUT_FILE: Path to DTC_Attr_Link_Input.txt
+/// - DIAMANT_FWDTCLINK_INPUT_FILE: Path to FW_DTC_Link_Input.txt
+/// 
+/// This combined plugin reduces execution time by running all steps in one DiamantPro session.
+/// </description>
+/// <icon>{plugin.png}</icon>
+/// <entrypoint>DbLoad</entrypoint>
+
+using System;
+using System.Reflection;
+using DDB = com.bosch.Diamant.Diagnosis;
+using DPP = com.bosch.Diamant.Plugins;
+using com.bosch.Diamant.Plugins;
+using System.IO;
+using System.Collections.Generic;
+using System.Linq;
+using System.Xml.Linq;
+
+public partial class Plugin : DPP.IPlugin
+{
+    private StreamWriter loginfo;
+    private DPP.IContext ctx;
+
+    public void Declare(DPP.IDeclarationContext ctx)
+    {
+        // No declarations required
+    }
+
+    public void Execute(DPP.IContext context)
+    {
+        ctx = context;
+        
+        using (loginfo = File.CreateText(ctx.SplitMerge.CurrentDirectory + @"\Diamant_DTC_Complete_Workflow_Log.txt"))
+        {
+            loginfo.WriteLine("===============================================");
+            loginfo.WriteLine("Start of Complete DTC Database Update Workflow");
+            loginfo.WriteLine("===============================================\n");
+
+            try
+            {
+                // Verify all environment variables are set
+                string dtcInputFile = Environment.GetEnvironmentVariable("DIAMANT_DTC_INPUT_FILE");
+                string dtcAttrInputFile = Environment.GetEnvironmentVariable("DIAMANT_DTCATTR_INPUT_FILE");
+                string dtcAttrLinkInputFile = Environment.GetEnvironmentVariable("DIAMANT_DTCATTRLINK_INPUT_FILE");
+                string fwDtcLinkInputFile = Environment.GetEnvironmentVariable("DIAMANT_FWDTCLINK_INPUT_FILE");
+
+                if (string.IsNullOrEmpty(dtcInputFile) || string.IsNullOrEmpty(dtcAttrInputFile) || 
+                    string.IsNullOrEmpty(dtcAttrLinkInputFile) || string.IsNullOrEmpty(fwDtcLinkInputFile))
+                {
+                    string errorMsg = "ERROR: All 4 environment variables must be set:\n" +
+                                     "  - DIAMANT_DTC_INPUT_FILE\n" +
+                                     "  - DIAMANT_DTCATTR_INPUT_FILE\n" +
+                                     "  - DIAMANT_DTCATTRLINK_INPUT_FILE\n" +
+                                     "  - DIAMANT_FWDTCLINK_INPUT_FILE";
+                    ctx.IO.ConsoleWrite("Error", errorMsg);
+                    loginfo.WriteLine(errorMsg);
+                    ctx.Succeed = false;
+                    return;
+                }
+
+                loginfo.WriteLine("Environment Variables Configured:");
+                loginfo.WriteLine($"  DIAMANT_DTC_INPUT_FILE: {dtcInputFile}");
+                loginfo.WriteLine($"  DIAMANT_DTCATTR_INPUT_FILE: {dtcAttrInputFile}");
+                loginfo.WriteLine($"  DIAMANT_DTCATTRLINK_INPUT_FILE: {dtcAttrLinkInputFile}");
+                loginfo.WriteLine($"  DIAMANT_FWDTCLINK_INPUT_FILE: {fwDtcLinkInputFile}\n");
+
+                // Execute all 4 steps sequentially
+                bool step1Success = ExecuteStep1_CreateDTCs(dtcInputFile);
+                if (!step1Success)
+                {
+                    ctx.IO.ConsoleWrite("Error", "Step 1 (Create DTCs) failed. Aborting workflow.");
+                    ctx.Succeed = false;
+                    return;
+                }
+
+                bool step2Success = ExecuteStep2_CreateDTCAttributes(dtcAttrInputFile);
+                if (!step2Success)
+                {
+                    ctx.IO.ConsoleWrite("Error", "Step 2 (Create DTC Attributes) failed. Aborting workflow.");
+                    ctx.Succeed = false;
+                    return;
+                }
+
+                bool step3Success = ExecuteStep3_LinkDTCAttributes(dtcAttrLinkInputFile);
+                if (!step3Success)
+                {
+                    ctx.IO.ConsoleWrite("Error", "Step 3 (Link DTC Attributes) failed. Aborting workflow.");
+                    ctx.Succeed = false;
+                    return;
+                }
+
+                bool step4Success = ExecuteStep4_LinkFailureWords(fwDtcLinkInputFile);
+                if (!step4Success)
+                {
+                    ctx.IO.ConsoleWrite("Error", "Step 4 (Link Failure Words) failed. Aborting workflow.");
+                    ctx.Succeed = false;
+                    return;
+                }
+
+                loginfo.WriteLine("\n===============================================");
+                loginfo.WriteLine("Complete DTC Database Update Workflow FINISHED");
+                loginfo.WriteLine("All 4 steps completed successfully!");
+                loginfo.WriteLine("===============================================");
+                
+                ctx.IO.ConsoleWrite("Info", "✓ Complete DTC Database Update Workflow finished successfully!");
+                ctx.Succeed = true;
+            }
+            catch (Exception ex)
+            {
+                ctx.IO.ConsoleWrite("Error", $"Workflow exception: {ex.Message}");
+                loginfo.WriteLine($"\nERROR: Workflow exception: {ex.Message}");
+                loginfo.WriteLine($"Stack trace: {ex.StackTrace}");
+                ctx.Succeed = false;
+            }
+        }
+    }
+
+    // ========================================
+    // STEP 1: Create/Update DTC Entries
+    // ========================================
+    private bool ExecuteStep1_CreateDTCs(string inputFile)
+    {
+        loginfo.WriteLine("\n==========================================");
+        loginfo.WriteLine("STEP 1: Create/Update DTC Entries");
+        loginfo.WriteLine("==========================================");
+        ctx.IO.ConsoleWrite("Info", "Step 1/4: Creating/Updating DTC entries...");
+
+        try
+        {
+            if (!File.Exists(inputFile))
+            {
+                loginfo.WriteLine($"ERROR: File not found: {inputFile}");
+                return false;
+            }
+
+            // Parse input file
+            var entries = ParseKeyValueFile(inputFile);
+            if (entries.Count == 0)
+            {
+                loginfo.WriteLine("ERROR: No valid DTC entries found in the file.");
+                return false;
+            }
+
+            loginfo.WriteLine($"Parsed {entries.Count} DTC entries from input file.");
+
+            // Initialize DTC handler
+            var dtcAH = ctx.Handlers["DTC"];
+            if (null == dtcAH)
+            {
+                throw new Exception("DTC access handler does not exist.");
+            }
+
+            int createdCount = 0;
+            int updatedCount = 0;
+            int unchangedCount = 0;
+
+            foreach (var entry in entries)
+            {
+                string dtcValue = null;
+                string shortName = null;
+                
+                if (!entry.TryGetValue("DTC", out dtcValue))
+                {
+                    loginfo.WriteLine("WARNING: Skipping block with no 'DTC' value");
+                    continue;
+                }
+
+                if (!entry.TryGetValue("SHORT-NAME", out shortName))
+                {
+                    shortName = "DTC_" + dtcValue.Replace("0x", "").ToUpperInvariant();
+                }
+
+                loginfo.WriteLine($"Processing DTC: {shortName} ({dtcValue})");
+
+                DDB.DTC dtcToProcess = dtcAH.Get(shortName) as DDB.DTC;
+                bool isNew = (dtcToProcess == null);
+                bool hasChanges = false;
+
+                if (isNew)
+                {
+                    dtcToProcess = new DDB.DTC();
+                    dtcToProcess.SHORT_NAME = shortName;
+                    dtcToProcess.DTC_VALUE = dtcValue;
+                    hasChanges = true;
+                    createdCount++;
+                    loginfo.WriteLine($"  Creating new DTC");
+                }
+                else
+                {
+                    loginfo.WriteLine($"  DTC exists, checking for changes...");
+                    // Only update DTC_VALUE if it differs
+                    if (dtcToProcess.DTC_VALUE != dtcValue)
+                    {
+                        loginfo.WriteLine($"    DTC_VALUE: '{dtcToProcess.DTC_VALUE}' -> '{dtcValue}'");
+                        dtcToProcess.DTC_VALUE = dtcValue;
+                        hasChanges = true;
+                    }
+                }
+
+                // Set DTC properties only if new OR if value in input differs from current
+                if (entry.ContainsKey("DESC"))
+                {
+                    string newDesc = entry["DESC"];
+                    if (isNew || dtcToProcess.DESC != newDesc)
+                    {
+                        if (!isNew) loginfo.WriteLine($"    DESC: '{dtcToProcess.DESC}' -> '{newDesc}'");
+                        dtcToProcess.DESC = newDesc;
+                        hasChanges = true;
+                    }
+                }
+
+                if (entry.ContainsKey("CUSTOMER_REF"))
+                {
+                    string newCustRef = entry["CUSTOMER_REF"];
+                    if (isNew || dtcToProcess.CUSTOMER_REF != newCustRef)
+                    {
+                        if (!isNew) loginfo.WriteLine($"    CUSTOMER_REF: '{dtcToProcess.CUSTOMER_REF}' -> '{newCustRef}'");
+                        dtcToProcess.CUSTOMER_REF = newCustRef;
+                        hasChanges = true;
+                    }
+                }
+
+                if (entry.ContainsKey("PROJECT_REF"))
+                {
+                    string newProjRef = entry["PROJECT_REF"];
+                    if (isNew || dtcToProcess.PROJECT_REF != newProjRef)
+                    {
+                        if (!isNew) loginfo.WriteLine($"    PROJECT_REF: '{dtcToProcess.PROJECT_REF}' -> '{newProjRef}'");
+                        dtcToProcess.PROJECT_REF = newProjRef;
+                        hasChanges = true;
+                    }
+                }
+
+                if (entry.ContainsKey("PRODUCT_LINE_REF"))
+                {
+                    string newProdLineRef = entry["PRODUCT_LINE_REF"];
+                    if (isNew || dtcToProcess.PRODUCT_LINE_REF != newProdLineRef)
+                    {
+                        if (!isNew) loginfo.WriteLine($"    PRODUCT_LINE_REF: '{dtcToProcess.PRODUCT_LINE_REF}' -> '{newProdLineRef}'");
+                        dtcToProcess.PRODUCT_LINE_REF = newProdLineRef;
+                        hasChanges = true;
+                    }
+                }
+
+                // Update KEYLIST values only if specified in input
+                string[] keylistKeys = {
+                    "WarningIndicatorDeactTrigger",
+                    "DemWWHOBDFreezeFrameClassRef",
+                    "ENDRelevant",
+                    "OBDReadinessGroup",
+                    "DTCTripInfo",
+                    "OBDClassicDtcValue",
+                    "DemRbAlternativeDTC",
+                    "OBDonUDSDtcValue",
+                    "OBDonUDSReadinessGroup",
+                    "ZEVonUDSDtcValue",
+                    "ZEVonUDSReadinessGroup"
+                };
+
+                foreach (string keylistKey in keylistKeys)
+                {
+                    if (entry.ContainsKey(keylistKey))
+                    {
+                        string newValue = entry[keylistKey];
+                        string currentValue = GetKeylistValue(dtcToProcess.KEYLIST, keylistKey);
+                        
+                        if (isNew || currentValue != newValue)
+                        {
+                            if (!isNew) loginfo.WriteLine($"    KEYLIST.{keylistKey}: '{currentValue}' -> '{newValue}'");
+                            dtcToProcess.KEYLIST = UpdateKeylistValue(dtcToProcess.KEYLIST, keylistKey, newValue);
+                            hasChanges = true;
+                        }
+                    }
+                }
+
+                // Try to set AUTOSAR_DTC properties using reflection
+                try
+                {
+                    Type dtcType = dtcToProcess.GetType();
+                    PropertyInfo autosarDtcProperty = dtcType.GetProperty("AUTOSAR_DTC");
+                    
+                    if (autosarDtcProperty != null)
+                    {
+                        object autosarDtc = autosarDtcProperty.GetValue(dtcToProcess);
+                        
+                        if (autosarDtc == null && (entry.ContainsKey("DtcSeverity") || entry.ContainsKey("WWHOBDDtcClass")))
+                        {
+                            Type autosarType = autosarDtcProperty.PropertyType;
+                            autosarDtc = Activator.CreateInstance(autosarType);
+                            autosarDtcProperty.SetValue(dtcToProcess, autosarDtc);
+                        }
+
+                        // Reconstruct AUTOSAR_DTC with ONLY whitelisted properties to avoid empty XML tags
+                        // Strategy: Create fresh object ONLY if we have whitelist properties to set
+                        if (autosarDtc != null || entry.ContainsKey("DtcSeverity") || entry.ContainsKey("WWHOBDDtcClass") || entry.ContainsKey("DtcFunctionalunit"))
+                        {
+                            // Check if we have ANY whitelisted properties in the input
+                            bool hasWhitelistProperties = entry.ContainsKey("DtcSeverity") || entry.ContainsKey("WWHOBDDtcClass") || entry.ContainsKey("DtcFunctionalunit");
+                            
+                            // Log removal of non-whitelisted properties from existing AUTOSAR_DTC
+                            if (autosarDtc != null)
+                            {
+                                PropertyInfo[] allProps = autosarDtc.GetType().GetProperties();
+                                foreach (PropertyInfo prop in allProps)
+                                {
+                                    if (prop.Name != "DtcSeverity" && prop.Name != "WWHOBDDtcClass" && prop.Name != "DtcFunctionalunit")
+                                    {
+                                        object val = prop.GetValue(autosarDtc);
+                                        if (val != null && val.ToString() != "0" && val.ToString() != "" && val.ToString() != string.Empty)
+                                        {
+                                            loginfo.WriteLine($"    Removing AUTOSAR_DTC.{prop.Name} (not in whitelist): '{val}'");
+                                            hasChanges = true;
+                                        }
+                                    }
+                                }
+                            }
+                            
+                            // If we have whitelisted properties to set, create a fresh AUTOSAR_DTC
+                            // Otherwise, set AUTOSAR_DTC to null to remove it entirely
+                            if (hasWhitelistProperties)
+                            {
+                                Type autosarType = autosarDtcProperty.PropertyType;
+                                autosarDtc = Activator.CreateInstance(autosarType);
+                                autosarDtcProperty.SetValue(dtcToProcess, autosarDtc);
+                            }
+                            else
+                            {
+                                // No whitelisted properties in input, remove AUTOSAR_DTC entirely
+                                if (autosarDtc != null)
+                                {
+                                    loginfo.WriteLine("    Removing AUTOSAR_DTC section (no whitelisted properties in input)");
+                                    autosarDtcProperty.SetValue(dtcToProcess, null);
+                                    autosarDtc = null;
+                                    hasChanges = true;
+                                }
+                            }
+                        }
+
+                        // Now set ONLY the three whitelisted properties on the fresh AUTOSAR_DTC object
+                        if (autosarDtc != null)
+                        {
+                            // Set DtcSeverity if provided in input
+                            if (entry.ContainsKey("DtcSeverity"))
+                            {
+                                PropertyInfo severityProp = autosarDtc.GetType().GetProperty("DtcSeverity");
+                                if (severityProp != null)
+                                {
+                                    string newValue = entry["DtcSeverity"];
+                                    if (!isNew) loginfo.WriteLine($"    Setting AUTOSAR_DTC.DtcSeverity: '{newValue}'");
+                                    severityProp.SetValue(autosarDtc, newValue);
+                                    hasChanges = true;
+                                }
+                            }
+
+                            // Set WWHOBDDtcClass if provided in input
+                            if (entry.ContainsKey("WWHOBDDtcClass"))
+                            {
+                                PropertyInfo wwhobdProp = autosarDtc.GetType().GetProperty("WWHOBDDtcClass");
+                                if (wwhobdProp != null)
+                                {
+                                    string newValue = entry["WWHOBDDtcClass"];
+                                    if (!isNew) loginfo.WriteLine($"    Setting AUTOSAR_DTC.WWHOBDDtcClass: '{newValue}'");
+                                    wwhobdProp.SetValue(autosarDtc, newValue);
+                                    hasChanges = true;
+                                }
+                            }
+
+                            // Set DtcFunctionalunit if provided in input
+                            if (entry.ContainsKey("DtcFunctionalunit"))
+                            {
+                                PropertyInfo funcUnitProp = autosarDtc.GetType().GetProperty("DtcFunctionalunit");
+                                if (funcUnitProp != null)
+                                {
+                                    string newValue = entry["DtcFunctionalunit"];
+                                    if (!isNew) loginfo.WriteLine($"    Setting AUTOSAR_DTC.DtcFunctionalunit: '{newValue}'");
+                                    
+                                    Type propType = funcUnitProp.PropertyType;
+                                    try
+                                    {
+                                        if (propType == typeof(string))
+                                        {
+                                            funcUnitProp.SetValue(autosarDtc, newValue);
+                                        }
+                                        else if (propType == typeof(int) || propType == typeof(uint) || propType == typeof(byte))
+                                        {
+                                            if (int.TryParse(newValue, out int intVal))
+                                            {
+                                                funcUnitProp.SetValue(autosarDtc, intVal);
+                                            }
+                                        }
+                                        hasChanges = true;
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        loginfo.WriteLine($"      WARNING: Could not set DtcFunctionalunit: {ex.Message}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (Exception reflectEx)
+                {
+                    loginfo.WriteLine($"  REFLECTION WARNING: {reflectEx.Message}");
+                }
+
+                // Only call ModifyAdd if there are changes
+                if (hasChanges)
+                {
+                    bool success = dtcAH.ModifyAdd(dtcToProcess);
+                    loginfo.WriteLine($"  ModifyAdd returned: {success}");
+                    if (!isNew)
+                    {
+                        updatedCount++;
+                    }
+                }
+                else
+                {
+                    unchangedCount++;
+                    loginfo.WriteLine($"  No changes detected, skipping ModifyAdd");
+                }
+            }
+
+            loginfo.WriteLine($"\nStep 1 Results: Created={createdCount}, Updated={updatedCount}, Unchanged={unchangedCount}");
+            ctx.IO.ConsoleWrite("Info", $"Step 1 complete: {createdCount} created, {updatedCount} updated, {unchangedCount} unchanged");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            loginfo.WriteLine($"ERROR in Step 1: {ex.Message}");
+            return false;
+        }
+    }
+
+    // ========================================
+    // STEP 2: Create/Update DTC Attributes
+    // ========================================
+    private bool ExecuteStep2_CreateDTCAttributes(string inputFile)
+    {
+        loginfo.WriteLine("\n==========================================");
+        loginfo.WriteLine("STEP 2: Create/Update DTC Attributes");
+        loginfo.WriteLine("==========================================");
+        ctx.IO.ConsoleWrite("Info", "Step 2/4: Creating/Updating DTC Attributes...");
+
+        try
+        {
+            if (!File.Exists(inputFile))
+            {
+                loginfo.WriteLine($"ERROR: File not found: {inputFile}");
+                return false;
+            }
+
+            var entries = ParseKeyValueFile(inputFile);
+            if (entries.Count == 0)
+            {
+                loginfo.WriteLine("ERROR: No valid DTC Attribute entries found.");
+                return false;
+            }
+
+            loginfo.WriteLine($"Parsed {entries.Count} DTC Attribute entries.");
+
+            // Determine customer and product line from first entry
+            string customerRef = null;
+            string productLineRef = null;
+            
+            if (entries.Count > 0)
+            {
+                var firstEntry = entries[0];
+                if (firstEntry.ContainsKey("CUSTOMER_REF"))
+                    customerRef = firstEntry["CUSTOMER_REF"].Replace("Cus_", "");
+                if (firstEntry.ContainsKey("PRODUCT_LINE_REF"))
+                    productLineRef = firstEntry["PRODUCT_LINE_REF"];
+            }
+
+            // Find splitter XML file
+            var candidateFiles = ctx.SplitMerge.Files
+                .Where(f => f.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+                .Where(f => f.Contains("DTCATTRIBUTES") || f.Contains("DtcAttribute"))
+                .Select(f => Path.Combine(ctx.SplitMerge.CurrentDirectory, f))
+                .Where(f => File.Exists(f))
+                .ToList();
+            
+            string splitterFile = null;
+            
+            if (!string.IsNullOrEmpty(customerRef) && !string.IsNullOrEmpty(productLineRef))
+            {
+                splitterFile = candidateFiles.FirstOrDefault(f => 
+                    f.Contains($"__{customerRef}__", StringComparison.OrdinalIgnoreCase) &&
+                    f.Contains(productLineRef, StringComparison.OrdinalIgnoreCase));
+            }
+            
+            if (splitterFile == null && !string.IsNullOrEmpty(customerRef))
+            {
+                splitterFile = candidateFiles.FirstOrDefault(f => 
+                    f.Contains($"__{customerRef}__", StringComparison.OrdinalIgnoreCase) ||
+                    f.Contains($"__{customerRef}.", StringComparison.OrdinalIgnoreCase));
+            }
+            
+            if (splitterFile == null)
+            {
+                splitterFile = candidateFiles.FirstOrDefault();
+            }
+            
+            if (string.IsNullOrEmpty(splitterFile))
+            {
+                throw new Exception("Could not find DTCATTRIBUTES splitter XML file.");
+            }
+            
+            loginfo.WriteLine($"Using splitter file: {Path.GetFileName(splitterFile)}");
+
+            // Load XML document
+            XDocument xmlDoc = XDocument.Load(splitterFile);
+            XNamespace ns = xmlDoc.Root.GetDefaultNamespace();
+            
+            var autosarCollections = xmlDoc.Descendants(ns + "AUTOSAR_COLLECTIONS").FirstOrDefault();
+            if (autosarCollections == null)
+            {
+                autosarCollections = new XElement(ns + "AUTOSAR_COLLECTIONS");
+                xmlDoc.Root.Add(autosarCollections);
+            }
+            
+            var dtcAttributesCollection = autosarCollections.Element(ns + "DTCATTRIBUTES");
+            if (dtcAttributesCollection == null)
+            {
+                dtcAttributesCollection = new XElement(ns + "DTCATTRIBUTES");
+                autosarCollections.Add(dtcAttributesCollection);
+            }
+
+            // Build index of existing attributes across all files
+            var existingAttributesIndex = new Dictionary<string, Tuple<string, XDocument, XNamespace>>(StringComparer.OrdinalIgnoreCase);
+            
+            foreach (var candidateFile in candidateFiles)
+            {
+                try
+                {
+                    var candidateDoc = XDocument.Load(candidateFile);
+                    var candidateNs = candidateDoc.Root.GetDefaultNamespace();
+                    var candidateAttrs = candidateDoc.Descendants(candidateNs + "DtcAttribute");
+                    
+                    foreach (var attr in candidateAttrs)
+                    {
+                        var name = attr.Element(candidateNs + "SHORT-NAME")?.Value;
+                        if (!string.IsNullOrEmpty(name) && !existingAttributesIndex.ContainsKey(name))
+                        {
+                            existingAttributesIndex[name] = Tuple.Create(candidateFile, candidateDoc, candidateNs);
+                        }
+                    }
+                }
+                catch { }
+            }
+            
+            loginfo.WriteLine($"Found {existingAttributesIndex.Count} existing DTC Attributes.");
+
+            int createdCount = 0;
+            int updatedCount = 0;
+            int unchangedCount = 0;
+            var modifiedFiles = new HashSet<string>();
+
+            foreach (var entry in entries)
+            {
+                string shortName = null;
+                
+                if (!entry.TryGetValue("SHORT-NAME", out shortName))
+                {
+                    loginfo.WriteLine("WARNING: Skipping block with no 'SHORT-NAME'");
+                    continue;
+                }
+
+                loginfo.WriteLine($"Processing DTC Attribute: {shortName}");
+
+                XDocument targetDoc = xmlDoc;
+                XNamespace targetNs = ns;
+                string targetFile = splitterFile;
+                bool isExistingInOtherFile = false;
+                
+                // Check if already exists in another file
+                if (existingAttributesIndex.ContainsKey(shortName))
+                {
+                    var existingInfo = existingAttributesIndex[shortName];
+                    targetFile = existingInfo.Item1;
+                    targetDoc = existingInfo.Item2;
+                    targetNs = existingInfo.Item3;
+                    isExistingInOtherFile = true;
+                    loginfo.WriteLine($"  Found existing attribute in {Path.GetFileName(targetFile)}");
+                }
+                
+                // Get the target collection in the appropriate file
+                var targetAutosarCollections = targetDoc.Descendants(targetNs + "AUTOSAR_COLLECTIONS").FirstOrDefault();
+                if (targetAutosarCollections == null)
+                {
+                    targetAutosarCollections = new XElement(targetNs + "AUTOSAR_COLLECTIONS");
+                    targetDoc.Root.Add(targetAutosarCollections);
+                }
+                
+                var targetDtcAttributesCollection = targetAutosarCollections.Element(targetNs + "DTCATTRIBUTES");
+                if (targetDtcAttributesCollection == null)
+                {
+                    targetDtcAttributesCollection = new XElement(targetNs + "DTCATTRIBUTES");
+                    targetAutosarCollections.Add(targetDtcAttributesCollection);
+                }
+                
+                var existingAttr = targetDtcAttributesCollection.Elements(targetNs + "DtcAttribute")
+                    .FirstOrDefault(e => e.Element(targetNs + "SHORT-NAME")?.Value == shortName);
+
+                XElement dtcAttrElement;
+                bool isNew = (existingAttr == null);
+                bool hasChanges = false;
+                
+                if (isNew)
+                {
+                    dtcAttrElement = new XElement(targetNs + "DtcAttribute");
+                    targetDtcAttributesCollection.Add(dtcAttrElement);
+                    loginfo.WriteLine($"  Creating new DTC Attribute");
+                    hasChanges = true;
+                }
+                else
+                {
+                    dtcAttrElement = existingAttr;
+                    loginfo.WriteLine($"  DTC Attribute exists, checking for changes...");
+                }
+
+                // Update fields only if they are provided in the input file
+                // Track changes for each field
+                hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "SHORT-NAME", shortName, isNew, loginfo);
+                
+                if (entry.ContainsKey("Description"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "Description", entry["Description"], isNew, loginfo);
+                
+                if (entry.ContainsKey("CUSTOMER_REF"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "CUSTOMER_REF", entry["CUSTOMER_REF"], isNew, loginfo);
+                
+                if (entry.ContainsKey("PRODUCT_LINE_REF"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "PRODUCT_LINE_REF", entry["PRODUCT_LINE_REF"], isNew, loginfo);
+                
+                if (entry.ContainsKey("AgingAllowed"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "AgingAllowed", entry["AgingAllowed"], isNew, loginfo);
+                
+                if (entry.ContainsKey("AgingcyclecounterThreshold"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "AgingcyclecounterThreshold", entry["AgingcyclecounterThreshold"], isNew, loginfo);
+                
+                if (entry.ContainsKey("DemDTCPriority"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "DemDTCPriority", entry["DemDTCPriority"], isNew, loginfo);
+                
+                if (entry.ContainsKey("EventFailurecyclecounterThreshold"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "EventFailurecyclecounterThreshold", entry["EventFailurecyclecounterThreshold"], isNew, loginfo);
+                
+                if (entry.ContainsKey("MaxNumberFreezeFrameRecords"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "MaxNumberFreezeFrameRecords", entry["MaxNumberFreezeFrameRecords"], isNew, loginfo);
+                
+                if (entry.ContainsKey("AgingcycleRef"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "AgingcycleRef", entry["AgingcycleRef"], isNew, loginfo);
+                
+                if (entry.ContainsKey("ExtendedDataClassRef"))
+                {
+                    string extDataValue = entry["ExtendedDataClassRef"];
+                    // Add ExtData_ prefix if not already present
+                    if (!string.IsNullOrEmpty(extDataValue) && !extDataValue.StartsWith("ExtData_"))
+                    {
+                        extDataValue = "ExtData_" + extDataValue;
+                    }
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "ExtendedDataClassRef", extDataValue, isNew, loginfo);
+                }
+                
+                if (entry.ContainsKey("FreezeFrameClassRef"))
+                {
+                    string fFrameValue = entry["FreezeFrameClassRef"];
+                    // Add FFrame_ prefix if not already present
+                    if (!string.IsNullOrEmpty(fFrameValue) && !fFrameValue.StartsWith("FFrame_"))
+                    {
+                        fFrameValue = "FFrame_" + fFrameValue;
+                    }
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "FreezeFrameClassRef", fFrameValue, isNew, loginfo);
+                }
+                
+                if (entry.ContainsKey("EventDestination"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "EventDestination", entry["EventDestination"], isNew, loginfo);
+                
+                if (entry.ContainsKey("EventDestinationMirror"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "EventDestinationMirror", entry["EventDestinationMirror"], isNew, loginfo);
+                
+                if (entry.ContainsKey("DTCKinds"))
+                    hasChanges |= SetOrUpdateElementIfChanged(dtcAttrElement, targetNs + "DTCKinds", entry["DTCKinds"], isNew, loginfo);
+                
+                // Update counters and track modified files
+                if (hasChanges)
+                {
+                    if (isNew)
+                    {
+                        createdCount++;
+                    }
+                    else
+                    {
+                        updatedCount++;
+                    }
+                    modifiedFiles.Add(targetFile);
+                }
+                else
+                {
+                    unchangedCount++;
+                    loginfo.WriteLine($"  No changes detected, skipping update");
+                }
+            }
+
+            // Save all modified files
+            foreach (var fileToSave in modifiedFiles)
+            {
+                var docToSave = existingAttributesIndex.Values
+                    .FirstOrDefault(v => v.Item1 == fileToSave)?.Item2 ?? xmlDoc;
+                docToSave.Save(fileToSave);
+                loginfo.WriteLine($"Saved changes to: {Path.GetFileName(fileToSave)}");
+            }
+            loginfo.WriteLine($"\nStep 2 Results: Created={createdCount}, Updated={updatedCount}, Unchanged={unchangedCount}");
+            ctx.IO.ConsoleWrite("Info", $"Step 2 complete: {createdCount} created, {updatedCount} updated, {unchangedCount} unchanged");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            loginfo.WriteLine($"ERROR in Step 2: {ex.Message}");
+            return false;
+        }
+    }
+
+    // ========================================
+    // STEP 3: Link DTC Attributes to DTCs
+    // ========================================
+    private bool ExecuteStep3_LinkDTCAttributes(string inputFile)
+    {
+        loginfo.WriteLine("\n==========================================");
+        loginfo.WriteLine("STEP 3: Link DTC Attributes to DTCs");
+        loginfo.WriteLine("==========================================");
+        ctx.IO.ConsoleWrite("Info", "Step 3/4: Linking DTC Attributes to DTCs...");
+
+        try
+        {
+            if (!File.Exists(inputFile))
+            {
+                loginfo.WriteLine($"ERROR: File not found: {inputFile}");
+                return false;
+            }
+
+            var entries = ParseKeyValueFile(inputFile);
+            if (entries.Count == 0)
+            {
+                loginfo.WriteLine("ERROR: No valid DTC-Attribute link entries found.");
+                return false;
+            }
+
+            loginfo.WriteLine($"Parsed {entries.Count} DTC-Attribute link entries.");
+
+            // Determine customer from DTCAttributesClassRef
+            string customerRef = null;
+            
+            if (entries.Count > 0)
+            {
+                var firstEntry = entries[0];
+                if (firstEntry.ContainsKey("DTCAttributesClassRef"))
+                {
+                    string attrRef = firstEntry["DTCAttributesClassRef"];
+                    var parts = attrRef.Split('_');
+                    if (parts.Length > 1)
+                        customerRef = parts[1];
+                }
+            }
+
+            // Find splitter XML file
+            var candidateFiles = ctx.SplitMerge.Files
+                .Where(f => f.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+                .Where(f => f.Contains("DTC_AttributesClassLink") || f.Contains("DTC_ATTRIBUTES_CLASS_LINK"))
+                .Select(f => Path.Combine(ctx.SplitMerge.CurrentDirectory, f))
+                .Where(f => File.Exists(f))
+                .ToList();
+            
+            string splitterFile = null;
+            
+            if (!string.IsNullOrEmpty(customerRef))
+            {
+                splitterFile = candidateFiles.FirstOrDefault(f => 
+                    f.Contains($"__{customerRef}.", StringComparison.OrdinalIgnoreCase) ||
+                    f.Contains($"__{customerRef}_", StringComparison.OrdinalIgnoreCase));
+            }
+            
+            if (splitterFile == null)
+            {
+                splitterFile = candidateFiles.FirstOrDefault();
+            }
+            
+            if (string.IsNullOrEmpty(splitterFile))
+            {
+                throw new Exception("Could not find DTC_ATTRIBUTES_CLASS_LINKS splitter XML file.");
+            }
+            
+            loginfo.WriteLine($"Using splitter file: {Path.GetFileName(splitterFile)}");
+
+            // Load XML document
+            XDocument xmlDoc = XDocument.Load(splitterFile);
+            XNamespace ns = xmlDoc.Root.GetDefaultNamespace();
+            
+            var dtcLinks = xmlDoc.Descendants(ns + "DTC_LINKS").FirstOrDefault();
+            if (dtcLinks == null)
+            {
+                dtcLinks = new XElement(ns + "DTC_LINKS");
+                xmlDoc.Root.Add(dtcLinks);
+            }
+            
+            var dtcAttrLinksCollection = dtcLinks.Element(ns + "DTC_ATTRIBUTES_CLASS_LINKS");
+            if (dtcAttrLinksCollection == null)
+            {
+                dtcAttrLinksCollection = new XElement(ns + "DTC_ATTRIBUTES_CLASS_LINKS");
+                dtcLinks.Add(dtcAttrLinksCollection);
+            }
+
+            int createdCount = 0;
+            int updatedCount = 0;
+
+            foreach (var entry in entries)
+            {
+                string dtcRef = null;
+                string attrClassRef = null;
+                
+                if (!entry.TryGetValue("dtc_ref", out dtcRef))
+                {
+                    loginfo.WriteLine("WARNING: Skipping block with no 'dtc_ref'");
+                    continue;
+                }
+
+                if (!entry.TryGetValue("DTCAttributesClassRef", out attrClassRef))
+                {
+                    loginfo.WriteLine($"WARNING: Skipping '{dtcRef}' with no 'DTCAttributesClassRef'");
+                    continue;
+                }
+
+                loginfo.WriteLine($"Processing Link: dtc_ref={dtcRef}, DTCAttributesClassRef={attrClassRef}");
+
+                var existingLink = dtcAttrLinksCollection.Elements(ns + "DTC_ATTRIBUTES_CLASS_LINK")
+                    .FirstOrDefault(e => e.Element(ns + "dtc_ref")?.Value == dtcRef);
+
+                XElement linkElement;
+                if (existingLink == null)
+                {
+                    linkElement = new XElement(ns + "DTC_ATTRIBUTES_CLASS_LINK");
+                    dtcAttrLinksCollection.Add(linkElement);
+                    createdCount++;
+                }
+                else
+                {
+                    linkElement = existingLink;
+                    updatedCount++;
+                }
+
+                SetOrUpdateElement(linkElement, ns + "dtc_ref", dtcRef);
+                SetOrUpdateElement(linkElement, ns + "DTCAttributesClassRef", attrClassRef);
+            }
+
+            xmlDoc.Save(splitterFile);
+            loginfo.WriteLine($"\nStep 3 Results: Created={createdCount}, Updated={updatedCount}");
+            ctx.IO.ConsoleWrite("Info", $"Step 3 complete: {createdCount} created, {updatedCount} updated");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            loginfo.WriteLine($"ERROR in Step 3: {ex.Message}");
+            return false;
+        }
+    }
+
+    // ========================================
+    // STEP 4: Link Failure Words to DTCs
+    // ========================================
+    private bool ExecuteStep4_LinkFailureWords(string inputFile)
+    {
+        loginfo.WriteLine("\n==========================================");
+        loginfo.WriteLine("STEP 4: Link Failure Words to DTCs");
+        loginfo.WriteLine("==========================================");
+        ctx.IO.ConsoleWrite("Info", "Step 4/4: Linking Failure Words to DTCs...");
+
+        try
+        {
+            if (!File.Exists(inputFile))
+            {
+                loginfo.WriteLine($"ERROR: File not found: {inputFile}");
+                return false;
+            }
+
+            var entries = ParseKeyValueFile(inputFile);
+            if (entries.Count == 0)
+            {
+                loginfo.WriteLine("ERROR: No valid FW-DTC link entries found.");
+                return false;
+            }
+
+            loginfo.WriteLine($"Parsed {entries.Count} FW-DTC link entries.");
+
+            // Initialize FW_LINK_PRJ_DTC_REF handler
+            var fwDtcLinkAH = ctx.Handlers["FW_LINK_PRJ_DTC_REF"];
+            if (null == fwDtcLinkAH)
+            {
+                throw new Exception("FW_LINK_PRJ_DTC_REF access handler does not exist.");
+            }
+
+            int createdCount = 0;
+            int updatedCount = 0;
+
+            foreach (var entry in entries)
+            {
+                string fwRef = null;
+                string dtcRef = null;
+                
+                if (!entry.TryGetValue("FW_REF", out fwRef))
+                {
+                    loginfo.WriteLine("WARNING: Skipping block with no 'FW_REF'");
+                    continue;
+                }
+
+                if (!entry.TryGetValue("DTC_REF", out dtcRef))
+                {
+                    loginfo.WriteLine($"WARNING: Skipping '{fwRef}' with no 'DTC_REF'");
+                    continue;
+                }
+
+                loginfo.WriteLine($"Processing FW-DTC Link: FW_REF={fwRef}, DTC_REF={dtcRef}");
+
+                DDB.FW_LINK_PRJ_DTC_REF linkToProcess = fwDtcLinkAH.Get(fwRef) as DDB.FW_LINK_PRJ_DTC_REF;
+
+                if (linkToProcess == null)
+                {
+                    linkToProcess = new DDB.FW_LINK_PRJ_DTC_REF();
+                    linkToProcess.FW_REF = fwRef;
+                    createdCount++;
+                }
+                else
+                {
+                    updatedCount++;
+                }
+
+                linkToProcess.FW_REF = fwRef;
+                linkToProcess.DTC_REF = dtcRef;
+
+                bool success = fwDtcLinkAH.ModifyAdd(linkToProcess);
+                loginfo.WriteLine($"  ModifyAdd returned: {success}");
+            }
+
+            loginfo.WriteLine($"\nStep 4 Results: Created={createdCount}, Updated={updatedCount}");
+            ctx.IO.ConsoleWrite("Info", $"Step 4 complete: {createdCount} created, {updatedCount} updated");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            loginfo.WriteLine($"ERROR in Step 4: {ex.Message}");
+            return false;
+        }
+    }
+
+    // ========================================
+    // Helper Methods
+    // ========================================
+    
+    private List<Dictionary<string, string>> ParseKeyValueFile(string filePath)
+    {
+        string[] lines = File.ReadAllLines(filePath);
+        var entries = new List<Dictionary<string, string>>();
+        Dictionary<string, string> current = null;
+
+        foreach (var raw in lines)
+        {
+            var l = raw ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(l))
+            {
+                if (current != null && current.Count > 0)
+                {
+                    entries.Add(current);
+                    current = null;
+                }
+                continue;
+            }
+
+            if (current == null)
+                current = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            int idx = l.IndexOf(':');
+            if (idx > 0)
+            {
+                string key = l.Substring(0, idx).Trim();
+                string val = l.Substring(idx + 1).Trim();
+                if (!current.ContainsKey(key))
+                    current[key] = val;
+            }
+        }
+
+        if (current != null && current.Count > 0)
+            entries.Add(current);
+
+        return entries;
+    }
+
+    private DDB.KEYLIST UpdateKeylistValue(DDB.KEYLIST keylist, string keyname, string newValue)
+    {
+        if (keylist == null)
+        {
+            keylist = new DDB.KEYLIST();
+        }
+        
+        var index = keylist.ITEMCollection.ToList().FindIndex(it => it.key == keyname);
+        if (index != -1)
+        {
+            keylist.ITEMCollection[index].Value = newValue;
+        }
+        else
+        {
+            keylist.ITEMCollection.Add(new DDB.ITEM() { key = keyname, Value = newValue });
+        }
+        return keylist;
+    }
+    
+    private string GetKeylistValue(DDB.KEYLIST keylist, string keyname)
+    {
+        if (keylist == null)
+        {
+            return string.Empty;
+        }
+        
+        var item = keylist.ITEMCollection.ToList().FirstOrDefault(it => it.key == keyname);
+        return item != null ? item.Value : string.Empty;
+    }
+    
+    private static void SetOrUpdateElement(XElement parent, XName elementName, string value)
+    {
+        var element = parent.Element(elementName);
+        if (element == null)
+        {
+            parent.Add(new XElement(elementName, value));
+        }
+        else
+        {
+            element.Value = value;
+        }
+    }
+    
+    private static bool SetOrUpdateElementIfChanged(XElement parent, XName elementName, string newValue, bool isNew, StreamWriter loginfo)
+    {
+        var element = parent.Element(elementName);
+        string currentValue = element?.Value ?? string.Empty;
+        
+        // Normalize empty values
+        if (string.IsNullOrEmpty(newValue)) newValue = string.Empty;
+        if (string.IsNullOrEmpty(currentValue)) currentValue = string.Empty;
+        
+        if (element == null)
+        {
+            // Element doesn't exist, create it
+            parent.Add(new XElement(elementName, newValue));
+            if (!isNew && !string.IsNullOrEmpty(newValue))
+            {
+                loginfo.WriteLine($"    {elementName.LocalName}: '' -> '{newValue}'");
+            }
+            return !string.IsNullOrEmpty(newValue);
+        }
+        else if (currentValue != newValue)
+        {
+            // Element exists but value is different
+            if (!isNew)
+            {
+                loginfo.WriteLine($"    {elementName.LocalName}: '{currentValue}' -> '{newValue}'");
+            }
+            element.Value = newValue;
+            return true;
+        }
+        
+        // No change
+        return false;
+    }
+}

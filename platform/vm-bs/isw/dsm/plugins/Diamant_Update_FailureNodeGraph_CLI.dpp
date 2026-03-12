@@ -1,0 +1,1881 @@
+/// <name>Update FAILURE_WORD, NODE, and Graph Links from txt files (Complete CLI Plugin)</name>
+/// <version>2.0</version>
+/// <author>Jayasri Masi Nanjappan</author>
+/// <description>
+/// Complete diagnostic database update plugin for FAILURE_WORD, NODE, and NODE_LINK entries.
+/// Reads three separate input files for complete diagnostic database integration.
+/// 
+/// CLI Usage:
+/// set DIAMANT_FW_INPUT_FILE=C:\path\to\Diamant_Generate_FWSplitter.txt
+/// set DIAMANT_NODE_INPUT_FILE=C:\path\to\Diamant_Generate_NodeSplitter.txt
+/// set DIAMANT_GRAPHLINK_INPUT_FILE=C:\path\to\Diamant_Generate_GraphLinks.txt
+/// DiamantProCLI.exe --READSPLITTER=FileList.csv --RUNPLUGIN=plugins\Diamant_Update_FailureNodeGraph_CLI.dpp --WRITESPLITTERS --CONSOLEOUTPUT=ALL
+/// 
+/// All three environment variables are optional. Provide any 1-3 input files as needed.
+/// Processing order: FAILURE_WORD → NODE → Graph Links (dependency-aware)
+/// 
+/// Example FW input format:
+/// Failure Name: FW_HydraulicUndervoltage
+/// Customer: Cus_CHR
+/// SW_GROUP_REF: DCOM
+/// PRODUCT_LINE_REF: IPB
+/// 
+/// Example NODE input format:
+/// Node name: Node_VoltageHandler
+/// Customer: Cus_CHR
+/// SW_GROUP_REF: SwGrp_DCOM
+/// Failure: FW_HydraulicUndervoltage,100
+/// 
+/// Example Graph Link input format:
+/// Node name: Node_VoltageHandler
+/// Parent: Node_Ecu
+/// </description>
+
+using System;
+using DDB = com.bosch.Diamant.Diagnosis;
+using DPP = com.bosch.Diamant.Plugins;
+using com.bosch.Diamant.Plugins;
+using System.IO;
+using System.Collections.Generic;
+using System.Linq;
+using System.Globalization;
+using System.Reflection;
+
+public partial class Plugin : DPP.IPlugin
+{
+    public void Declare(DPP.IDeclarationContext ctx)
+    {
+        // No declarations required
+    }
+
+    public void Execute(DPP.IContext ctx)
+    {
+        // Create log file without redirecting console (CLI compatibility)
+        string logFilePath = ctx.SplitMerge.CurrentDirectory + @"\Diamant_Update_FailureNodeGraph_CLI_Log.txt";
+        using (StreamWriter loginfo = File.CreateText(logFilePath))
+        {
+            loginfo.WriteLine("===================================================================================");
+            loginfo.WriteLine("Start of Diamant_Update_FailureNodeGraph_CLI Execution...");
+            loginfo.WriteLine("Complete plugin for FAILURE_WORD, NODE, and Graph Links database updates");
+            loginfo.WriteLine("===================================================================================\n");
+            loginfo.Flush();
+
+            try
+            {
+                // Check for environment variables for all three input files
+                string fwInputFile = Environment.GetEnvironmentVariable("DIAMANT_FW_INPUT_FILE");
+                string nodeInputFile = Environment.GetEnvironmentVariable("DIAMANT_NODE_INPUT_FILE");
+                string graphLinkInputFile = Environment.GetEnvironmentVariable("DIAMANT_GRAPHLINK_INPUT_FILE");
+                
+                // Handle FW input file
+                if (!string.IsNullOrEmpty(fwInputFile))
+                {
+                    ctx.IO.ConsoleWrite("Info", $"Using FW input file from environment variable: {fwInputFile}");
+                    loginfo.WriteLine($"Using FW input file from DIAMANT_FW_INPUT_FILE environment variable: {fwInputFile}");
+                }
+                else
+                {
+                    ctx.IO.ConsoleWrite("Info", "No DIAMANT_FW_INPUT_FILE environment variable found. Skipping FAILURE_WORD processing.");
+                    loginfo.WriteLine("No DIAMANT_FW_INPUT_FILE environment variable found. Skipping FAILURE_WORD processing.");
+                }
+                
+                // Handle NODE input file
+                if (!string.IsNullOrEmpty(nodeInputFile))
+                {
+                    ctx.IO.ConsoleWrite("Info", $"Using NODE input file from environment variable: {nodeInputFile}");
+                    loginfo.WriteLine($"Using NODE input file from DIAMANT_NODE_INPUT_FILE environment variable: {nodeInputFile}");
+                }
+                else
+                {
+                    ctx.IO.ConsoleWrite("Info", "No DIAMANT_NODE_INPUT_FILE environment variable found. Skipping NODE processing.");
+                    loginfo.WriteLine("No DIAMANT_NODE_INPUT_FILE environment variable found. Skipping NODE processing.");
+                }
+                
+                // Handle Graph Link input file
+                if (!string.IsNullOrEmpty(graphLinkInputFile))
+                {
+                    ctx.IO.ConsoleWrite("Info", $"Using Graph Link input file from environment variable: {graphLinkInputFile}");
+                    loginfo.WriteLine($"Using Graph Link input file from DIAMANT_GRAPHLINK_INPUT_FILE environment variable: {graphLinkInputFile}");
+                }
+                else
+                {
+                    ctx.IO.ConsoleWrite("Info", "No DIAMANT_GRAPHLINK_INPUT_FILE environment variable found. Skipping Graph Links processing.");
+                    loginfo.WriteLine("No DIAMANT_GRAPHLINK_INPUT_FILE environment variable found. Skipping Graph Links processing.");
+                }
+                
+                // Check if at least one input file is provided
+                if (string.IsNullOrEmpty(fwInputFile) && string.IsNullOrEmpty(nodeInputFile) && string.IsNullOrEmpty(graphLinkInputFile))
+                {
+                    ctx.IO.ConsoleWrite("Error", "No input files selected. Plugin aborted.");
+                    loginfo.WriteLine("ERROR: No input files selected. Plugin aborted.");
+                    ctx.Succeed = false;
+                    return;
+                }
+                
+                bool hasFwInput = !string.IsNullOrEmpty(fwInputFile) && File.Exists(fwInputFile);
+                bool hasNodeInput = !string.IsNullOrEmpty(nodeInputFile) && File.Exists(nodeInputFile);
+                bool hasGraphLinkInput = !string.IsNullOrEmpty(graphLinkInputFile) && File.Exists(graphLinkInputFile);
+                
+                if (!hasFwInput && !string.IsNullOrEmpty(fwInputFile))
+                {
+                    ctx.IO.ConsoleWrite("Warn", $"FW input file not found: {fwInputFile}");
+                    loginfo.WriteLine($"WARNING: FW input file not found: {fwInputFile}");
+                }
+                
+                if (!hasNodeInput && !string.IsNullOrEmpty(nodeInputFile))
+                {
+                    ctx.IO.ConsoleWrite("Warn", $"NODE input file not found: {nodeInputFile}");
+                    loginfo.WriteLine($"WARNING: NODE input file not found: {nodeInputFile}");
+                }
+                
+                if (!hasGraphLinkInput && !string.IsNullOrEmpty(graphLinkInputFile))
+                {
+                    ctx.IO.ConsoleWrite("Warn", $"Graph Link input file not found: {graphLinkInputFile}");
+                    loginfo.WriteLine($"WARNING: Graph Link input file not found: {graphLinkInputFile}");
+                }
+                
+                if (!hasFwInput && !hasNodeInput && !hasGraphLinkInput)
+                {
+                    ctx.IO.ConsoleWrite("Error", "No valid input files found. Plugin aborted.");
+                    loginfo.WriteLine("ERROR: No valid input files found. Plugin aborted.");
+                    ctx.Succeed = false;
+                    return;
+                }
+
+                loginfo.WriteLine($"Input files:");
+                loginfo.WriteLine($"  FAILURE_WORD: {(hasFwInput ? fwInputFile : "(none)")}");
+                loginfo.WriteLine($"  NODE: {(hasNodeInput ? nodeInputFile : "(none)")}");
+                loginfo.WriteLine($"  GRAPH_LINK: {(hasGraphLinkInput ? graphLinkInputFile : "(none)")}\n");
+
+                bool fwSuccess = true;
+                bool nodeSuccess = true;
+                bool graphLinkSuccess = true;
+
+                // Process FAILURE_WORD entries if input file provided
+                if (hasFwInput)
+                {
+                    loginfo.WriteLine("###########################################################################");
+                    loginfo.WriteLine("PROCESSING FAILURE_WORD ENTRIES");
+                    loginfo.WriteLine("###########################################################################\n");
+                    fwSuccess = ProcessFailureWords(ctx, fwInputFile, loginfo);
+                }
+
+                // Process NODE entries if input file provided
+                if (hasNodeInput)
+                {
+                    loginfo.WriteLine("\n###########################################################################");
+                    loginfo.WriteLine("PROCESSING NODE ENTRIES");
+                    loginfo.WriteLine("###########################################################################\n");
+                    nodeSuccess = ProcessNodes(ctx, nodeInputFile, loginfo);
+                }
+
+                // Process Graph Links if input file provided
+                if (hasGraphLinkInput)
+                {
+                    loginfo.WriteLine("\n###########################################################################");
+                    loginfo.WriteLine("PROCESSING GRAPH LINKS");
+                    loginfo.WriteLine("###########################################################################\n");
+                    graphLinkSuccess = ProcessGraphLinks(ctx, graphLinkInputFile, loginfo);
+                }
+
+                // Overall success
+                ctx.Succeed = fwSuccess && nodeSuccess && graphLinkSuccess;
+                
+                loginfo.WriteLine("\n===================================================================================");
+                loginfo.WriteLine("End of Diamant_Update_FailureNodeGraph_CLI Execution");
+                loginfo.WriteLine($"Overall Status: {(ctx.Succeed ? "SUCCESS" : "FAILED")}");
+                loginfo.WriteLine("NOTE: Use --WRITESPLITTERS flag in CLI to persist changes to XML files.");
+                loginfo.WriteLine("===================================================================================");
+            }
+            catch (Exception ex)
+            {
+                ctx.IO.ConsoleWrite("Error", $"Plugin exception: {ex.Message}");
+                loginfo.WriteLine($"\nERROR: Plugin exception: {ex.Message}");
+                loginfo.WriteLine($"Stack trace: {ex.StackTrace}");
+                ctx.Succeed = false;
+            }
+        }
+    }
+
+    private bool ProcessFailureWords(DPP.IContext ctx, string inputFile, StreamWriter loginfo)
+    {
+        try
+        {
+            // Parse input file with global configuration support
+            string[] lines = File.ReadAllLines(inputFile);
+            var entries = new List<Dictionary<string, string>>();
+            Dictionary<string, string> current = null;
+            Dictionary<string, string> globalConfig = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var raw in lines)
+            {
+                var l = raw ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(l))
+                {
+                    if (current != null && current.Count > 0)
+                    {
+                        entries.Add(current);
+                        current = null;
+                    }
+                    continue;
+                }
+
+                if (current == null)
+                    current = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                int idx = l.IndexOf(':');
+                if (idx > 0)
+                {
+                    string key = l.Substring(0, idx).Trim();
+                    string val = l.Substring(idx + 1).Trim();
+                    
+                    // Check if this is a global configuration parameter (before any Failure Name)
+                    if (entries.Count == 0 && current.Count == 0)
+                    {
+                        if (key.Equals("Customer", StringComparison.OrdinalIgnoreCase) ||
+                            key.Equals("Project", StringComparison.OrdinalIgnoreCase) ||
+                            key.Equals("SW_GROUP_REF", StringComparison.OrdinalIgnoreCase) ||
+                            key.Equals("PRODUCT_LINE_REF", StringComparison.OrdinalIgnoreCase))
+                        {
+                            globalConfig[key] = val;
+                            continue;
+                        }
+                    }
+                    
+                    if (!current.ContainsKey(key))
+                        current[key] = val;
+                }
+                else
+                {
+                    if (current != null && current.Count > 0)
+                    {
+                        var lastKey = current.Keys.Last();
+                        current[lastKey] = current[lastKey] + "\n" + l.Trim();
+                    }
+                }
+            }
+
+            if (current != null && current.Count > 0)
+                entries.Add(current);
+
+            if (entries.Count == 0)
+            {
+                ctx.IO.ConsoleWrite("Error", "No valid failure word entries found in the file.");
+                loginfo.WriteLine("ERROR: No valid failure word entries found in the file.");
+                return false;
+            }
+
+            // Log global configuration
+            loginfo.WriteLine("Global Configuration (from FW input file):");
+            if (globalConfig.TryGetValue("Customer", out var gCust))
+                loginfo.WriteLine($"  Customer: {gCust}");
+            if (globalConfig.TryGetValue("Project", out var gProj))
+                loginfo.WriteLine($"  Project: {gProj}");
+            if (globalConfig.TryGetValue("SW_GROUP_REF", out var gSW))
+                loginfo.WriteLine($"  SW_GROUP_REF: {gSW}");
+            if (globalConfig.TryGetValue("PRODUCT_LINE_REF", out var gPL))
+                loginfo.WriteLine($"  PRODUCT_LINE_REF: {gPL}");
+            loginfo.WriteLine();
+
+            ctx.IO.ConsoleWrite("Info", $"Parsed {entries.Count} failure word entries from input file.");
+            loginfo.WriteLine($"Parsed {entries.Count} failure word entries from input file.\n");
+
+            // Initialize FAILURE_WORD handler
+            var fwAH = ctx.Handlers["FAILURE_WORD"];
+            if (null == fwAH)
+            {
+                throw new Exception("FAILURE_WORD access handler does not exist.");
+            }
+
+            List<DDB.FAILURE_WORD> fwCompList = new List<DDB.FAILURE_WORD>();
+            foreach (string fwKey in fwAH.GetAllKeys())
+            {
+                DDB.FAILURE_WORD getFwParams = (DDB.FAILURE_WORD)fwAH.Get(fwKey);
+                if (null == getFwParams)
+                    throw new Exception($"Failed to retrieve FAILURE_WORD for key '{fwKey}'.");
+                fwCompList.Add(getFwParams);
+            }
+            loginfo.WriteLine($"Retrieved {fwCompList.Count} existing FAILURE_WORD entries from database.\n");
+
+            // Process each failure word entry
+            int createdCount = 0;
+            int updatedCount = 0;
+
+            foreach (var entry in entries)
+            {
+                string fwShortName = null;
+                if (!entry.TryGetValue("Failure Name", out fwShortName) && !entry.TryGetValue("SHORT-NAME", out fwShortName))
+                {
+                    ctx.IO.ConsoleWrite("Warn", "Skipping block with no 'Failure Name'");
+                    loginfo.WriteLine("WARNING: Skipping block with no 'Failure Name'\n");
+                    continue;
+                }
+
+                loginfo.WriteLine($"Processing FAILURE_WORD: {fwShortName}");
+
+                // Check if FAILURE_WORD exists
+                DDB.FAILURE_WORD fwToProcess = fwCompList.FirstOrDefault(f => f.SHORT_NAME == fwShortName);
+
+                bool isNewFailure = false;
+                if (fwToProcess == null)
+                {
+                    ctx.IO.ConsoleWrite("Info", $"'{fwShortName}' not found. Creating new FAILURE_WORD.");
+                    loginfo.WriteLine($"  '{fwShortName}' not found in database. Creating new FAILURE_WORD object.");
+                    fwToProcess = new DDB.FAILURE_WORD();
+                    fwToProcess.SHORT_NAME = fwShortName;
+                    isNewFailure = true;
+                    createdCount++;
+                }
+                else
+                {
+                    ctx.IO.ConsoleWrite("Info", $"Found existing FAILURE_WORD '{fwShortName}'. Validating and updating properties.");
+                    loginfo.WriteLine($"  Found existing FAILURE_WORD '{fwShortName}' in database.");
+                    loginfo.WriteLine($"  Comparing input file values with database values...");
+                    updatedCount++;
+                    
+                    // WORKAROUND: Check if description is changing and UMID exists
+                    // UMID is based on description and short name, so if description changes, UMID must be cleared
+                    string newDescription = null;
+                    if (entry.TryGetValue("Description", out var vDesc) && !string.IsNullOrWhiteSpace(vDesc))
+                        newDescription = vDesc;
+                    
+                    bool descriptionChanging = !string.IsNullOrEmpty(newDescription) && fwToProcess.FSC_DESC != newDescription;
+                    bool hasUMID = false;
+                    string currentUMID = "";
+                    
+                    try
+                    {
+                        if (fwToProcess.UMID != null)
+                        {
+                            currentUMID = fwToProcess.UMID.Value ?? "";
+                            hasUMID = !string.IsNullOrEmpty(currentUMID);
+                        }
+                    }
+                    catch
+                    {
+                        hasUMID = false;
+                    }
+                    
+                    loginfo.WriteLine($"  Description changing: {descriptionChanging}, Has UMID: {hasUMID}");
+                    
+                    if (descriptionChanging && hasUMID)
+                    {
+                        loginfo.WriteLine($"  UMID WORKAROUND ACTIVATED: Description is changing and UMID exists.");
+                        loginfo.WriteLine($"    Old FSC_DESC: '{fwToProcess.FSC_DESC}'");
+                        loginfo.WriteLine($"    New FSC_DESC: '{newDescription}'");
+                        loginfo.WriteLine($"    Current UMID: '{currentUMID}' (will be cleared to allow update)");
+                        
+                        // Clear UMID to allow ModifyAdd to work
+                        fwToProcess.UMID.Value = "";
+                        
+                        ctx.IO.ConsoleWrite("Warn", $"Cleared UMID for '{fwShortName}' due to description change - will be regenerated");
+                        loginfo.WriteLine($"  UMID cleared successfully. Update will proceed and UMID will be regenerated.");
+                    }
+                    else if (hasUMID && !descriptionChanging)
+                    {
+                        loginfo.WriteLine($"  UMID '{currentUMID}' present but description not changing - update will proceed normally.");
+                    }
+                    else if (descriptionChanging && !hasUMID)
+                    {
+                        loginfo.WriteLine($"  Description changing but no UMID present - update will proceed normally.");
+                    }
+                }
+
+                // Update AUTOSAR debouncer FIRST (before other properties) to ensure consistency
+                try
+                {
+                    UpdateAutosarDebouncer(fwToProcess, entry, loginfo);
+                    loginfo.WriteLine($"  Updated AUTOSAR DebouncerAlgorithm for '{fwShortName}'.");
+                }
+                catch (Exception ex)
+                {
+                    loginfo.WriteLine($"  WARNING: Failed to update AUTOSAR: {ex.Message}");
+                    ctx.IO.ConsoleWrite("Warn", $"AUTOSAR update failed for '{fwShortName}': {ex.Message}");
+                }
+
+                // Update MONITORING and TEST_COMPLETE
+                try
+                {
+                    UpdateMonitoring(fwToProcess, entry, loginfo);
+                    loginfo.WriteLine($"  Updated MONITORING for '{fwShortName}'.");
+                }
+                catch (Exception ex)
+                {
+                    loginfo.WriteLine($"  WARNING: Failed to update MONITORING: {ex.Message}");
+                }
+
+                try
+                {
+                    UpdateTestComplete(fwToProcess, entry, loginfo);
+                    loginfo.WriteLine($"  Updated TEST_COMPLETE for '{fwShortName}'.");
+                }
+                catch (Exception ex)
+                {
+                    loginfo.WriteLine($"  WARNING: Failed to update TEST_COMPLETE: {ex.Message}");
+                }
+
+                // Now update standard properties and track changes
+                int changedPropertiesCount = UpdateFailureWordProperties(fwToProcess, entry, globalConfig, ctx, loginfo, isNewFailure);
+                
+                if (!isNewFailure)
+                {
+                    if (changedPropertiesCount > 0)
+                    {
+                        loginfo.WriteLine($"  Total properties updated: {changedPropertiesCount}");
+                        ctx.IO.ConsoleWrite("Info", $"Updated {changedPropertiesCount} properties for '{fwShortName}'");
+                    }
+                    else
+                    {
+                        loginfo.WriteLine($"  No property changes detected - all values match input file.");
+                    }
+                }
+
+                // Save to database with enhanced error handling  
+                // NOTE: ModifyAdd works for BOTH new and existing entries in DiamantPro
+                // It updates existing entries if they already exist, creates new ones if they don't
+                bool success = false;
+                try
+                {
+                    success = fwAH.ModifyAdd(fwToProcess);
+                    
+                    if (isNewFailure)
+                    {
+                        loginfo.WriteLine($"  ModifyAdd for new entry '{fwShortName}' returned: {success}");
+                        if (!success)
+                        {
+                            ctx.IO.ConsoleWrite("Error", $"ModifyAdd FAILED - new entry '{fwShortName}' not created!");
+                            loginfo.WriteLine($"  ERROR: Failed to create new entry.");
+                        }
+                        else
+                        {
+                            ctx.IO.ConsoleWrite("Info", $"Created new '{fwShortName}'");
+                        }
+                    }
+                    else
+                    {
+                        loginfo.WriteLine($"  ModifyAdd for existing entry '{fwShortName}' returned: {success}");
+                        if (!success)
+                        {
+                            ctx.IO.ConsoleWrite("Warn", $"ModifyAdd returned False for '{fwShortName}' - changes may not persist");
+                            loginfo.WriteLine($"  WARNING: ModifyAdd returned False. Changes detected but may not be saved.");
+                            loginfo.WriteLine($"  This can happen if the entry is locked or has validation issues.");
+                            loginfo.WriteLine($"  TIP: Try removing UMID or check for database locks.");
+                        }
+                        else
+                        {
+                            ctx.IO.ConsoleWrite("Info", $"Updated existing '{fwShortName}'");
+                            loginfo.WriteLine($"  SUCCESS: Changes will be persisted when --WRITESPLITTERS is executed.");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ctx.IO.ConsoleWrite("Error", $"ModifyAdd exception for '{fwShortName}': {ex.Message}");
+                    loginfo.WriteLine($"  EXCEPTION during ModifyAdd: {ex.Message}");
+                    loginfo.WriteLine($"  Stack trace: {ex.StackTrace}");
+                }
+                
+                loginfo.WriteLine("");
+            }
+
+            ctx.IO.ConsoleWrite("Info", $"FAILURE_WORD processing completed! Created: {createdCount}, Updated: {updatedCount}");
+            loginfo.WriteLine($"\nTotal FAILURE_WORDs created: {createdCount}");
+            loginfo.WriteLine($"Total FAILURE_WORDs updated: {updatedCount}");
+            
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ctx.IO.ConsoleWrite("Error", $"FW processing exception: {ex.Message}");
+            loginfo.WriteLine($"ERROR: FW processing exception: {ex.Message}");
+            loginfo.WriteLine($"Stack trace: {ex.StackTrace}");
+            return false;
+        }
+    }
+
+    private bool ProcessNodes(DPP.IContext ctx, string inputFile, StreamWriter loginfo)
+    {
+        try
+        {
+            // Parse input file
+            string[] lines = File.ReadAllLines(inputFile);
+            var entries = new List<Dictionary<string, string>>();
+            Dictionary<string, string> current = null;
+            Dictionary<string, string> globalConfig = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var raw in lines)
+            {
+                var l = raw ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(l))
+                {
+                    if (current != null && current.Count > 0)
+                    {
+                        entries.Add(current);
+                        current = null;
+                    }
+                    continue;
+                }
+
+                if (current == null)
+                    current = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                int idx = l.IndexOf(':');
+                if (idx > 0)
+                {
+                    string key = l.Substring(0, idx).Trim();
+                    string val = l.Substring(idx + 1).Trim();
+                    
+                    // Check for global configuration
+                    if (entries.Count == 0 && current.Count == 0)
+                    {
+                        if (key.Equals("Customer", StringComparison.OrdinalIgnoreCase) ||
+                            key.Equals("Project", StringComparison.OrdinalIgnoreCase) ||
+                            key.Equals("SW_GROUP_REF", StringComparison.OrdinalIgnoreCase) ||
+                            key.Equals("PRODUCT_LINE_REF", StringComparison.OrdinalIgnoreCase))
+                        {
+                            globalConfig[key] = val;
+                            continue;
+                        }
+                    }
+                    
+                    if (string.Equals(key, "Failure", StringComparison.OrdinalIgnoreCase) || string.Equals(key, "Failures", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!current.ContainsKey("Failure")) current["Failure"] = val;
+                        else current["Failure"] += "\n" + val;
+                    }
+                    else
+                    {
+                        if (!current.ContainsKey(key)) current[key] = val;
+                        else current[key] = current[key] + "\n" + val;
+                    }
+                }
+            }
+
+            if (current != null && current.Count > 0)
+                entries.Add(current);
+
+            if (entries.Count == 0)
+            {
+                ctx.IO.ConsoleWrite("Error", "No valid node entries found in the file.");
+                loginfo.WriteLine("ERROR: No valid node entries found in the file.");
+                return false;
+            }
+
+            // Log global configuration
+            loginfo.WriteLine("Global Configuration (from NODE input file):");
+            if (globalConfig.TryGetValue("Customer", out var gCust))
+                loginfo.WriteLine($"  Customer: {gCust}");
+            if (globalConfig.TryGetValue("Project", out var gProj))
+                loginfo.WriteLine($"  Project: {gProj}");
+            if (globalConfig.TryGetValue("SW_GROUP_REF", out var gSW))
+                loginfo.WriteLine($"  SW_GROUP_REF: {gSW}");
+            if (globalConfig.TryGetValue("PRODUCT_LINE_REF", out var gPL))
+                loginfo.WriteLine($"  PRODUCT_LINE_REF: {gPL}");
+            loginfo.WriteLine();
+
+            ctx.IO.ConsoleWrite("Info", $"Parsed {entries.Count} node entries from input file.");
+            loginfo.WriteLine($"Parsed {entries.Count} node entries from input file.\n");
+
+            // Initialize NODE handler
+            var nodeAH = ctx.Handlers["NODE"];
+            if (null == nodeAH)
+            {
+                throw new Exception("NODE access handler does not exist.");
+            }
+
+            List<DDB.NODE> nodeCompList = new List<DDB.NODE>();
+            foreach (string nodeKey in nodeAH.GetAllKeys())
+            {
+                DDB.NODE getNodeParams = (DDB.NODE)nodeAH.Get(nodeKey);
+                if (null == getNodeParams)
+                    throw new Exception($"Failed to retrieve Node for key '{nodeKey}'.");
+                nodeCompList.Add(getNodeParams);
+            }
+            loginfo.WriteLine($"Retrieved {nodeCompList.Count} existing NODE entries from database.\n");
+
+            // Process each node entry
+            int createdCount = 0;
+            int updatedCount = 0;
+
+            foreach (var entry in entries)
+            {
+                string nodeName = null;
+                if (!entry.TryGetValue("Node name", out nodeName) && !entry.TryGetValue("NAME", out nodeName) && !entry.TryGetValue("Name", out nodeName))
+                {
+                    ctx.IO.ConsoleWrite("Warn", "Skipping block with no 'Node name'");
+                    loginfo.WriteLine("WARNING: Skipping block with no 'Node name'\n");
+                    continue;
+                }
+
+                loginfo.WriteLine($"Processing NODE: {nodeName}");
+
+                // Check if NODE exists
+                DDB.NODE nodeToProcess = nodeCompList.FirstOrDefault(n => n.NAME == nodeName);
+
+                bool isNewNode = false;
+                if (nodeToProcess == null)
+                {
+                    ctx.IO.ConsoleWrite("Info", $"'{nodeName}' not found. Creating new NODE.");
+                    loginfo.WriteLine($"  '{nodeName}' not found in database. Creating new NODE object.");
+                    nodeToProcess = new DDB.NODE();
+                    nodeToProcess.NAME = nodeName;
+                    isNewNode = true;
+                    createdCount++;
+                }
+                else
+                {
+                    ctx.IO.ConsoleWrite("Info", $"Found existing NODE '{nodeName}'. Validating and updating properties.");
+                    loginfo.WriteLine($"  Found existing NODE '{nodeName}' in database.");
+                    loginfo.WriteLine($"  Comparing input file values with database values...");
+                    updatedCount++;
+                }
+
+                // Update NODE properties and track changes
+                int changedPropertiesCount = UpdateNodeProperties(nodeToProcess, entry, globalConfig, ctx, loginfo, isNewNode);
+                
+                if (!isNewNode)
+                {
+                    if (changedPropertiesCount > 0)
+                    {
+                        loginfo.WriteLine($"  Total properties updated: {changedPropertiesCount}");
+                    }
+                    else
+                    {
+                        loginfo.WriteLine($"  No property changes detected for NODE '{nodeName}'.");
+                    }
+                }
+
+                // Update FW_REFS using reflection with duplicate checking across all nodes
+                try
+                {
+                    UpdateNodeFwRefs(nodeToProcess, entry, loginfo, nodeCompList, ctx);
+                }
+                catch (Exception ex)
+                {
+                    loginfo.WriteLine($"  WARNING: Failed to update FW_REFS: {ex.Message}");
+                    ctx.IO.ConsoleWrite("Warn", $"FW_REFS update failed for '{nodeName}': {ex.Message}");
+                }
+
+                // Save to database
+                bool success = false;
+                try
+                {
+                    success = nodeAH.ModifyAdd(nodeToProcess);
+                    
+                    if (isNewNode)
+                    {
+                        if (success)
+                        {
+                            ctx.IO.ConsoleWrite("Info", $"Successfully created new NODE '{nodeName}'");
+                            loginfo.WriteLine($"  ModifyAdd for new NODE '{nodeName}' returned: {success}");
+                            loginfo.WriteLine($"  SUCCESS: New NODE created and will be persisted when --WRITESPLITTERS is executed.");
+                        }
+                        else
+                        {
+                            ctx.IO.ConsoleWrite("Error", $"Failed to create new NODE '{nodeName}'");
+                            loginfo.WriteLine($"  ModifyAdd for new NODE '{nodeName}' returned: {success}");
+                            loginfo.WriteLine($"  ERROR: Failed to create new NODE. Changes will NOT be persisted.");
+                        }
+                    }
+                    else
+                    {
+                        if (success)
+                        {
+                            ctx.IO.ConsoleWrite("Info", $"Successfully updated existing NODE '{nodeName}'");
+                            loginfo.WriteLine($"  ModifyAdd for existing NODE '{nodeName}' returned: {success}");
+                            loginfo.WriteLine($"  SUCCESS: Changes will be persisted when --WRITESPLITTERS is executed.");
+                        }
+                        else
+                        {
+                            ctx.IO.ConsoleWrite("Warn", $"ModifyAdd returned False for existing NODE '{nodeName}' but changes may still be queued");
+                            loginfo.WriteLine($"  ModifyAdd for existing NODE '{nodeName}' returned: {success}");
+                            loginfo.WriteLine($"  WARNING: ModifyAdd returned False. Verify changes with --WRITESPLITTERS.");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ctx.IO.ConsoleWrite("Error", $"ModifyAdd exception for '{nodeName}': {ex.Message}");
+                    loginfo.WriteLine($"  EXCEPTION during ModifyAdd: {ex.Message}");
+                    loginfo.WriteLine($"  Stack trace: {ex.StackTrace}");
+                }
+                
+                loginfo.WriteLine("");
+            }
+
+            ctx.IO.ConsoleWrite("Info", $"NODE processing completed! Created: {createdCount}, Updated: {updatedCount}");
+            loginfo.WriteLine($"\nTotal NODEs created: {createdCount}");
+            loginfo.WriteLine($"Total NODEs updated: {updatedCount}");
+            
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ctx.IO.ConsoleWrite("Error", $"NODE processing exception: {ex.Message}");
+            loginfo.WriteLine($"ERROR: NODE processing exception: {ex.Message}");
+            loginfo.WriteLine($"Stack trace: {ex.StackTrace}");
+            return false;
+        }
+    }
+
+    private int UpdateFailureWordProperties(DDB.FAILURE_WORD fw, Dictionary<string, string> entry, Dictionary<string, string> globalConfig, DPP.IContext ctx, StreamWriter log, bool isNew)
+    {
+        int changedCount = 0;
+        
+        // CATEGORY
+        string newCategory = null;
+        if (entry.TryGetValue("Category", out var vCat) && !string.IsNullOrWhiteSpace(vCat))
+            newCategory = vCat;
+        else if (string.IsNullOrEmpty(fw.CATEGORY))
+            newCategory = "ExternalFault";
+        else
+            newCategory = fw.CATEGORY;
+            
+        if (fw.CATEGORY != newCategory)
+        {
+            if (!isNew) log.WriteLine($"    CATEGORY: '{fw.CATEGORY}' -> '{newCategory}'");
+            fw.CATEGORY = newCategory;
+            changedCount++;
+        }
+
+        // FSC_DESC
+        string newDesc = null;
+        if (entry.TryGetValue("Description", out var vDesc) && !string.IsNullOrWhiteSpace(vDesc))
+            newDesc = vDesc;
+        else if (string.IsNullOrEmpty(fw.FSC_DESC))
+            newDesc = $"This fault will be set once we enter the mode for {fw.SHORT_NAME}";
+        else
+            newDesc = fw.FSC_DESC;
+            
+        if (fw.FSC_DESC != newDesc)
+        {
+            if (!isNew) log.WriteLine($"    FSC_DESC: '{fw.FSC_DESC}' -> '{newDesc}'");
+            fw.FSC_DESC = newDesc;
+            changedCount++;
+        }
+
+        // TASK_REF
+        string newTask = null;
+        if (entry.TryGetValue("Task cycle", out var tcycle) && !string.IsNullOrWhiteSpace(tcycle))
+            newTask = "Task_" + tcycle.Replace(" ", "").Replace("ms", "ms");
+        else if (string.IsNullOrEmpty(fw.TASK_REF))
+            newTask = "Task_20ms";
+        else
+            newTask = fw.TASK_REF;
+            
+        if (fw.TASK_REF != newTask)
+        {
+            if (!isNew) log.WriteLine($"    TASK_REF: '{fw.TASK_REF}' -> '{newTask}'");
+            fw.TASK_REF = newTask;
+            changedCount++;
+        }
+
+        // CUSTOMER_REF
+        string newCustomer = null;
+        if (entry.TryGetValue("Customer", out var cust) && !string.IsNullOrWhiteSpace(cust))
+            newCustomer = cust;
+        else if (globalConfig.TryGetValue("Customer", out var gCust2) && !string.IsNullOrWhiteSpace(gCust2))
+            newCustomer = gCust2;
+        else if (string.IsNullOrEmpty(fw.CUSTOMER_REF))
+            newCustomer = "Cus_RB";
+        else
+            newCustomer = fw.CUSTOMER_REF;
+            
+        if (fw.CUSTOMER_REF != newCustomer)
+        {
+            if (!isNew) log.WriteLine($"    CUSTOMER_REF: '{fw.CUSTOMER_REF}' -> '{newCustomer}'");
+            fw.CUSTOMER_REF = newCustomer;
+            changedCount++;
+        }
+
+        // PRODUCT_LINE_REF
+        string newPL = null;
+        if (entry.TryGetValue("PRODUCT_LINE_REF", out var vPL) && !string.IsNullOrWhiteSpace(vPL))
+            newPL = vPL;
+        else if (globalConfig.TryGetValue("PRODUCT_LINE_REF", out var gPL2) && !string.IsNullOrWhiteSpace(gPL2))
+            newPL = gPL2;
+        else
+            newPL = fw.PRODUCT_LINE_REF;
+            
+        if (!string.IsNullOrEmpty(newPL) && fw.PRODUCT_LINE_REF != newPL)
+        {
+            if (!isNew) log.WriteLine($"    PRODUCT_LINE_REF: '{fw.PRODUCT_LINE_REF}' -> '{newPL}'");
+            fw.PRODUCT_LINE_REF = newPL;
+            changedCount++;
+        }
+
+        // SW_GROUP_REF with auto-prefix
+        string newSWGroup = null;
+        if (entry.TryGetValue("SW_GROUP_REF", out var vSG) && !string.IsNullOrWhiteSpace(vSG))
+            newSWGroup = vSG.StartsWith("SwGrp_") ? vSG : $"SwGrp_{vSG}";
+        else if (globalConfig.TryGetValue("SW_GROUP_REF", out var gSW2) && !string.IsNullOrWhiteSpace(gSW2))
+            newSWGroup = gSW2.StartsWith("SwGrp_") ? gSW2 : $"SwGrp_{gSW2}";
+        else
+            newSWGroup = fw.SW_GROUP_REF;
+            
+        if (!string.IsNullOrEmpty(newSWGroup) && fw.SW_GROUP_REF != newSWGroup)
+        {
+            if (!isNew) log.WriteLine($"    SW_GROUP_REF: '{fw.SW_GROUP_REF}' -> '{newSWGroup}'");
+            fw.SW_GROUP_REF = newSWGroup;
+            changedCount++;
+        }
+
+        // PROJECT_REF
+        string newProject = null;
+        if (entry.TryGetValue("PROJECT_REF", out var vPR) && !string.IsNullOrWhiteSpace(vPR))
+            newProject = vPR;
+        else if (entry.TryGetValue("Project", out vPR) && !string.IsNullOrWhiteSpace(vPR))
+            newProject = vPR;
+        else if (globalConfig.TryGetValue("PROJECT_REF", out var gPR) && !string.IsNullOrWhiteSpace(gPR))
+            newProject = gPR;
+        else if (globalConfig.TryGetValue("Project", out gPR) && !string.IsNullOrWhiteSpace(gPR))
+            newProject = gPR;
+        else
+            newProject = fw.PROJECT_REF;
+            
+        if (!string.IsNullOrEmpty(newProject) && fw.PROJECT_REF != newProject)
+        {
+            if (!isNew) log.WriteLine($"    PROJECT_REF: '{fw.PROJECT_REF}' -> '{newProject}'");
+            fw.PROJECT_REF = newProject;
+            changedCount++;
+        }
+
+        // OPERATION_CYCLE_REF
+        string opRaw = null;
+        if (!entry.TryGetValue("Operation Cycle", out opRaw))
+            entry.TryGetValue("OperationCycle", out opRaw);
+
+        string newOpCycle = null;
+        if (!string.IsNullOrEmpty(opRaw))
+        {
+            var low = opRaw.ToLowerInvariant();
+            if (low.Contains("power")) newOpCycle = "PowerCycle";
+            else if (low.Contains("other")) newOpCycle = "OtherCycle";
+            else if (low.Contains("obd")) newOpCycle = "OBD_DCY";
+            else if (low.Contains("pfc")) newOpCycle = "PFCCycle";
+            else if (low.Contains("warm")) newOpCycle = "WarmUp";
+            else newOpCycle = opRaw.Replace(" ", string.Empty);
+        }
+        else if (string.IsNullOrEmpty(fw.OPERATION_CYCLE_REF))
+            newOpCycle = "PowerCycle";
+        else
+            newOpCycle = fw.OPERATION_CYCLE_REF;
+            
+        if (fw.OPERATION_CYCLE_REF != newOpCycle)
+        {
+            if (!isNew) log.WriteLine($"    OPERATION_CYCLE_REF: '{fw.OPERATION_CYCLE_REF}' -> '{newOpCycle}'");
+            fw.OPERATION_CYCLE_REF = newOpCycle;
+            changedCount++;
+        }
+
+        // Other simple properties
+        string newGoodCheck = null;
+        if (entry.TryGetValue("GOOD_CHECK", out var vGood) && !string.IsNullOrWhiteSpace(vGood))
+            newGoodCheck = vGood;
+        else if (string.IsNullOrEmpty(fw.GOOD_CHECK))
+            newGoodCheck = "true";
+        else
+            newGoodCheck = fw.GOOD_CHECK;
+            
+        if (fw.GOOD_CHECK != newGoodCheck)
+        {
+            if (!isNew) log.WriteLine($"    GOOD_CHECK: '{fw.GOOD_CHECK}' -> '{newGoodCheck}'");
+            fw.GOOD_CHECK = newGoodCheck;
+            changedCount++;
+        }
+
+        string newGoodCheckEnhanced = null;
+        if (entry.TryGetValue("GOOD_CHECK_ENHANCED", out var vGce) && !string.IsNullOrWhiteSpace(vGce))
+            newGoodCheckEnhanced = vGce;
+        else if (string.IsNullOrEmpty(fw.GOOD_CHECK_ENHANCED))
+            newGoodCheckEnhanced = "false";
+        else
+            newGoodCheckEnhanced = fw.GOOD_CHECK_ENHANCED;
+            
+        if (fw.GOOD_CHECK_ENHANCED != newGoodCheckEnhanced)
+        {
+            if (!isNew) log.WriteLine($"    GOOD_CHECK_ENHANCED: '{fw.GOOD_CHECK_ENHANCED}' -> '{newGoodCheckEnhanced}'");
+            fw.GOOD_CHECK_ENHANCED = newGoodCheckEnhanced;
+            changedCount++;
+        }
+
+        string newImportAscet = null;
+        if (entry.TryGetValue("IMPORT_FROM_ASCET", out var vImpAsc) && !string.IsNullOrWhiteSpace(vImpAsc))
+            newImportAscet = vImpAsc;
+        else if (string.IsNullOrEmpty(fw.IMPORT_FROM_ASCET))
+            newImportAscet = "false";
+        else
+            newImportAscet = fw.IMPORT_FROM_ASCET;
+            
+        if (fw.IMPORT_FROM_ASCET != newImportAscet)
+        {
+            if (!isNew) log.WriteLine($"    IMPORT_FROM_ASCET: '{fw.IMPORT_FROM_ASCET}' -> '{newImportAscet}'");
+            fw.IMPORT_FROM_ASCET = newImportAscet;
+            changedCount++;
+        }
+
+        string newExportAscet = null;
+        if (entry.TryGetValue("EXPORT_TO_ASCET", out var vExpAsc) && !string.IsNullOrWhiteSpace(vExpAsc))
+            newExportAscet = vExpAsc;
+        else if (string.IsNullOrEmpty(fw.EXPORT_TO_ASCET))
+            newExportAscet = "false";
+        else
+            newExportAscet = fw.EXPORT_TO_ASCET;
+            
+        if (fw.EXPORT_TO_ASCET != newExportAscet)
+        {
+            if (!isNew) log.WriteLine($"    EXPORT_TO_ASCET: '{fw.EXPORT_TO_ASCET}' -> '{newExportAscet}'");
+            fw.EXPORT_TO_ASCET = newExportAscet;
+            changedCount++;
+        }
+
+        var curVal = entry.TryGetValue("Curable", out var cval) ? cval : "No";
+        string newCurable = null;
+        if (!string.IsNullOrWhiteSpace(curVal))
+            newCurable = (curVal.Equals("Yes", StringComparison.OrdinalIgnoreCase) || curVal.Equals("True", StringComparison.OrdinalIgnoreCase)) ? "true" : "false";
+        else if (string.IsNullOrEmpty(fw.CURABLE_CURRENT_OC))
+            newCurable = "false";
+        else
+            newCurable = fw.CURABLE_CURRENT_OC;
+            
+        if (fw.CURABLE_CURRENT_OC != newCurable)
+        {
+            if (!isNew) log.WriteLine($"    CURABLE_CURRENT_OC: '{fw.CURABLE_CURRENT_OC}' -> '{newCurable}'");
+            fw.CURABLE_CURRENT_OC = newCurable;
+            changedCount++;
+        }
+
+        string newIumpr = null;
+        if (entry.TryGetValue("IUMPRSUPPORT", out var ium) && !string.IsNullOrWhiteSpace(ium))
+            newIumpr = ium;
+        else if (string.IsNullOrEmpty(fw.IUMPRSUPPORT))
+            newIumpr = "IUMPRNotSupp";
+        else
+            newIumpr = fw.IUMPRSUPPORT;
+            
+        if (fw.IUMPRSUPPORT != newIumpr)
+        {
+            if (!isNew) log.WriteLine($"    IUMPRSUPPORT: '{fw.IUMPRSUPPORT}' -> '{newIumpr}'");
+            fw.IUMPRSUPPORT = newIumpr;
+            changedCount++;
+        }
+
+        // Update KEYLIST with change tracking
+        if (fw.KEYLIST != null)
+        {
+            int keylistChanges = 0;
+            
+            keylistChanges += UpdateKeylistValueWithTracking(fw, "ASW_MONITORING_SUPPORTS_DEBUGDATA", entry.TryGetValue("ASW_MONITORING_SUPPORTS_DEBUGDATA", out var v0) ? v0 : "false", log, isNew);
+            keylistChanges += UpdateKeylistValueWithTracking(fw, "AR_GenFaultDetectCntUsed", "true", log, isNew);
+            
+            string demDeb = "NOTASSIGNED";
+            if (entry.TryGetValue("DemDebounceBehavior", out var vddb) && !string.IsNullOrWhiteSpace(vddb))
+                demDeb = vddb;
+            else if ((entry.ContainsKey("Enable Condition") && !string.IsNullOrWhiteSpace(entry["Enable Condition"])) || (entry.ContainsKey("EnableCondition") && !string.IsNullOrWhiteSpace(entry["EnableCondition"])))
+                demDeb = "DEM_DEBOUNCE_RESET";
+            keylistChanges += UpdateKeylistValueWithTracking(fw, "DemDebounceBehavior", demDeb, log, isNew);
+            
+            keylistChanges += UpdateKeylistValueWithTracking(fw, "DemEventMemoryEntryFdcThresholdStorageValue", entry.TryGetValue("DemEventMemoryEntryFdcThresholdStorageValue", out var vmem) ? vmem : "", log, isNew);
+            keylistChanges += UpdateKeylistValueWithTracking(fw, "DemCallbackInitMForEFnc_Type", entry.TryGetValue("DemCallbackInitMForEFnc_Type", out var vci) ? vci : "NotUsed", log, isNew);
+            keylistChanges += UpdateKeylistValueWithTracking(fw, "FaultDetectCntCbkViaRTE", entry.TryGetValue("FaultDetectCntCbkViaRTE", out var vfdr) ? vfdr : "false", log, isNew);
+            keylistChanges += UpdateKeylistValueWithTracking(fw, "RecoveryTime", entry.TryGetValue("Recovery Time", out var vR) ? vR : (entry.TryGetValue("RecoveryTime", out vR) ? vR : ""), log, isNew);
+            keylistChanges += UpdateKeylistValueWithTracking(fw, "ComponentGoodCheck", entry.TryGetValue("ComponentGoodCheck", out var vCg) ? vCg : "false", log, isNew);
+            keylistChanges += UpdateKeylistValueWithTracking(fw, "GraphInhibitionSupportForEvent", entry.TryGetValue("GraphInhibitionSupportForEvent", out var vGIS) && !string.IsNullOrWhiteSpace(vGIS) ? vGIS : "NotConfigured", log, isNew);
+            keylistChanges += UpdateKeylistValueWithTracking(fw, "Goodcheck_starts", entry.TryGetValue("Goodcheck_starts", out var vgcs) ? vgcs : "OnEvent", log, isNew);
+            
+            if (keylistChanges > 0)
+            {
+                changedCount += keylistChanges;
+                if (!isNew) log.WriteLine($"    KEYLIST: {keylistChanges} item(s) updated");
+            }
+        }
+
+        if (isNew)
+        {
+            log.WriteLine($"  Initialized all properties for new FAILURE_WORD '{fw.SHORT_NAME}'.");
+        }
+        
+        return changedCount;
+    }
+
+    private int UpdateNodeProperties(DDB.NODE node, Dictionary<string, string> entry, Dictionary<string, string> globalConfig, DPP.IContext ctx, StreamWriter log, bool isNew)
+    {
+        int changedCount = 0;
+        
+        // CUSTOMER_REF
+        string newCustomer = null;
+        if (entry.TryGetValue("Customer", out var cust) && !string.IsNullOrWhiteSpace(cust))
+            newCustomer = cust;
+        else if (globalConfig.TryGetValue("Customer", out cust) && !string.IsNullOrWhiteSpace(cust))
+            newCustomer = cust;
+        else if (string.IsNullOrEmpty(node.CUSTOMER_REF))
+            newCustomer = "Cus_CHR";
+        else
+            newCustomer = node.CUSTOMER_REF;
+            
+        if (node.CUSTOMER_REF != newCustomer)
+        {
+            if (!isNew) log.WriteLine($"    CUSTOMER_REF: '{node.CUSTOMER_REF}' -> '{newCustomer}'");
+            node.CUSTOMER_REF = newCustomer;
+            changedCount++;
+        }
+
+        // PROJECT_REF
+        string newProject = null;
+        if (entry.TryGetValue("PROJECT_REF", out var proj) && !string.IsNullOrWhiteSpace(proj))
+            newProject = proj;
+        else if (entry.TryGetValue("Project", out proj) && !string.IsNullOrWhiteSpace(proj))
+            newProject = proj;
+        else if (globalConfig.TryGetValue("PROJECT_REF", out proj) && !string.IsNullOrWhiteSpace(proj))
+            newProject = proj;
+        else if (globalConfig.TryGetValue("Project", out proj) && !string.IsNullOrWhiteSpace(proj))
+            newProject = proj;
+        else
+            newProject = node.PROJECT_REF ?? string.Empty;
+            
+        if (node.PROJECT_REF != newProject)
+        {
+            if (!isNew) log.WriteLine($"    PROJECT_REF: '{node.PROJECT_REF}' -> '{newProject}'");
+            node.PROJECT_REF = newProject;
+            changedCount++;
+        }
+
+        // SW_GROUP_REF with auto-prefix
+        string newSWGroup = null;
+        if (entry.TryGetValue("SW_GROUP_REF", out var swg) && !string.IsNullOrWhiteSpace(swg))
+            newSWGroup = swg.StartsWith("SwGrp_") ? swg : $"SwGrp_{swg}";
+        else if (globalConfig.TryGetValue("SW_GROUP_REF", out swg) && !string.IsNullOrWhiteSpace(swg))
+            newSWGroup = swg.StartsWith("SwGrp_") ? swg : $"SwGrp_{swg}";
+        else
+            newSWGroup = node.SW_GROUP_REF ?? string.Empty;
+            
+        if (node.SW_GROUP_REF != newSWGroup)
+        {
+            if (!isNew) log.WriteLine($"    SW_GROUP_REF: '{node.SW_GROUP_REF}' -> '{newSWGroup}'");
+            node.SW_GROUP_REF = newSWGroup;
+            changedCount++;
+        }
+
+        // PRODUCT_LINE_REF
+        string newPL = null;
+        if (entry.TryGetValue("PRODUCT_LINE_REF", out var pl) && !string.IsNullOrWhiteSpace(pl))
+            newPL = pl;
+        else if (globalConfig.TryGetValue("PRODUCT_LINE_REF", out pl) && !string.IsNullOrWhiteSpace(pl))
+            newPL = pl;
+        else
+            newPL = node.PRODUCT_LINE_REF ?? string.Empty;
+            
+        if (node.PRODUCT_LINE_REF != newPL)
+        {
+            if (!isNew) log.WriteLine($"    PRODUCT_LINE_REF: '{node.PRODUCT_LINE_REF}' -> '{newPL}'");
+            node.PRODUCT_LINE_REF = newPL;
+            changedCount++;
+        }
+
+        // Update KEYLIST with individual item tracking
+        if (node.KEYLIST != null)
+        {
+            int keylistChanges = 0;
+            
+            keylistChanges += UpdateNodeKeylistWithTracking(node, "Desc", entry.ContainsKey("Desc") ? entry["Desc"] : string.Empty, log, isNew);
+            keylistChanges += UpdateNodeKeylistWithTracking(node, "STATUSEXPORTTOASW", entry.ContainsKey("STATUSEXPORTTOASW") ? entry["STATUSEXPORTTOASW"].ToLower() : "false", log, isNew);
+            keylistChanges += UpdateNodeKeylistWithTracking(node, "ASWSETSINIT", entry.ContainsKey("ASWSETSINIT") ? entry["ASWSETSINIT"].ToLower() : "false", log, isNew);
+            keylistChanges += UpdateNodeKeylistWithTracking(node, "ALLOWEDRECOVERIES", entry.ContainsKey("ALLOWEDRECOVERIES") ? entry["ALLOWEDRECOVERIES"] : "0xFF", log, isNew);
+            keylistChanges += UpdateNodeKeylistWithTracking(node, "HWShutdown", entry.ContainsKey("HWShutdown") ? entry["HWShutdown"] : "NoHWShutdown", log, isNew);
+            keylistChanges += UpdateNodeKeylistWithTracking(node, "FW_Priorities_Disabled", entry.ContainsKey("FW_Priorities_Disabled") ? entry["FW_Priorities_Disabled"].ToLower() : "false", log, isNew);
+            
+            if (keylistChanges > 0)
+            {
+                changedCount += keylistChanges;
+                if (!isNew) log.WriteLine($"    KEYLIST: {keylistChanges} item(s) updated");
+            }
+        }
+
+        if (isNew)
+        {
+            log.WriteLine($"  Initialized all properties for new NODE '{node.NAME}'.");
+        }
+        
+        return changedCount;
+    }
+
+    private void UpdateNodeFwRefs(DDB.NODE node, Dictionary<string, string> entry, StreamWriter log, List<DDB.NODE> allNodes, DPP.IContext ctx)
+    {
+        log.WriteLine("  Attempting to access FW_REFS using reflection...");
+        
+        Type nodeType = node.GetType();
+        PropertyInfo fwRefsProperty = nodeType.GetProperty("FW_REFS") 
+            ?? nodeType.GetProperty("FAILURE_WORD_REFCollection")
+            ?? nodeType.GetProperty("FAILURE_WORD_REFS");
+        
+        if (fwRefsProperty == null)
+        {
+            log.WriteLine("  ERROR: Could not find FW_REFS property via reflection.");
+            return;
+        }
+
+        log.WriteLine($"  Found property: {fwRefsProperty.Name} (Type: {fwRefsProperty.PropertyType.Name})");
+        
+        object fwRefsCollection = fwRefsProperty.GetValue(node);
+        
+        if (fwRefsCollection == null)
+        {
+            log.WriteLine("  FW_REFS collection is null. Attempting to create new collection...");
+            Type collectionType = fwRefsProperty.PropertyType;
+            if (collectionType.IsGenericType)
+            {
+                fwRefsCollection = Activator.CreateInstance(collectionType);
+                fwRefsProperty.SetValue(node, fwRefsCollection);
+                log.WriteLine($"  Created new collection of type: {collectionType.Name}");
+            }
+            else
+            {
+                log.WriteLine("  ERROR: Cannot create collection - not a generic type.");
+                return;
+            }
+        }
+
+        // Clear existing FW_REFS
+        MethodInfo clearMethod = fwRefsCollection.GetType().GetMethod("Clear");
+        if (clearMethod != null)
+        {
+            clearMethod.Invoke(fwRefsCollection, null);
+            log.WriteLine("  Cleared existing FW_REFS.");
+        }
+
+        // Get the Add method
+        MethodInfo addMethod = fwRefsCollection.GetType().GetMethod("Add");
+        if (addMethod == null)
+        {
+            log.WriteLine("  ERROR: Add method not found on FW_REFS collection.");
+            return;
+        }
+
+        // Process Failure entries
+        if (entry.ContainsKey("Failure") && !string.IsNullOrWhiteSpace(entry["Failure"]))
+        {
+            var failureLines = entry["Failure"].Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            log.WriteLine($"  Processing {failureLines.Length} failure(s) for node '{node.NAME}':");
+
+            foreach (var failureLine in failureLines)
+            {
+                var part = failureLine.Trim();
+                if (string.IsNullOrEmpty(part)) continue;
+
+                string fwName = part;
+                string prioStr = null;
+                int comma = part.IndexOf(',');
+                if (comma >= 0)
+                {
+                    fwName = part.Substring(0, comma).Trim();
+                    prioStr = part.Substring(comma + 1).Trim();
+                }
+
+                string prio = "255";
+                if (!string.IsNullOrEmpty(prioStr))
+                {
+                    int prioInt;
+                    if (int.TryParse(prioStr, out prioInt))
+                    {
+                        prio = prioInt.ToString();
+                    }
+                }
+
+                // CRITICAL VALIDATION: Check if this FAILURE_WORD is already mapped to another NODE
+                // Business Rule: One FAILURE_WORD can only be mapped to ONE NODE
+                RemoveFailureFromOtherNodes(fwName, node.NAME, allNodes, log, ctx);
+
+                // Create FW_REF object
+                try
+                {
+                    Type fwRefType = Type.GetType("com.bosch.Diamant.Diagnosis.FW_REF, " + nodeType.Assembly.FullName);
+                    if (fwRefType == null)
+                        fwRefType = Type.GetType("com.bosch.Diamant.Diagnosis.FAILURE_WORD_REF, " + nodeType.Assembly.FullName);
+                    
+                    if (fwRefType != null)
+                    {
+                        object fwRef = Activator.CreateInstance(fwRefType);
+                        
+                        PropertyInfo valueProp = fwRefType.GetProperty("Value");
+                        if (valueProp != null)
+                            valueProp.SetValue(fwRef, fwName);
+                        
+                        PropertyInfo prioProp = fwRefType.GetProperty("prio");
+                        if (prioProp != null)
+                            prioProp.SetValue(fwRef, prio);
+                        
+                        addMethod.Invoke(fwRefsCollection, new object[] { fwRef });
+                        log.WriteLine($"    Added FW_REF: {fwName} with priority: {prio}");
+                    }
+                    else
+                    {
+                        log.WriteLine($"    ERROR: Could not find FW_REF or FAILURE_WORD_REF type.");
+                    }
+                }
+                catch (Exception refEx)
+                {
+                    log.WriteLine($"    ERROR creating FW_REF: {refEx.Message}");
+                }
+            }
+        }
+        else
+        {
+            log.WriteLine($"  WARNING: No failures listed for node '{node.NAME}'.");
+        }
+    }
+
+    private void RemoveFailureFromOtherNodes(string fwName, string currentNodeName, List<DDB.NODE> allNodes, StreamWriter log, DPP.IContext ctx)
+    {
+        // Get NODE AccessHandler for persisting changes
+        var nodeAH = ctx.Handlers["NODE"];
+        if (nodeAH == null)
+        {
+            log.WriteLine($"    WARNING: Cannot access NODE handler to persist FW removal.");
+            return;
+        }
+
+        // Search all NODEs for this FAILURE_WORD and remove it if found in a different NODE
+        foreach (var otherNode in allNodes)
+        {
+            // Skip the current node we're processing
+            if (otherNode.NAME == currentNodeName)
+                continue;
+
+            Type nodeType = otherNode.GetType();
+            PropertyInfo fwRefsProperty = nodeType.GetProperty("FW_REFS") 
+                ?? nodeType.GetProperty("FAILURE_WORD_REFCollection")
+                ?? nodeType.GetProperty("FAILURE_WORD_REFS");
+            
+            if (fwRefsProperty == null)
+                continue;
+
+            object fwRefsCollection = fwRefsProperty.GetValue(otherNode);
+            if (fwRefsCollection == null)
+                continue;
+
+            // Get the collection as IEnumerable to search through it
+            var enumerable = fwRefsCollection as System.Collections.IEnumerable;
+            if (enumerable == null)
+                continue;
+
+            // Find if this failure exists in the other node
+            object fwRefToRemove = null;
+            foreach (var item in enumerable)
+            {
+                PropertyInfo valueProp = item.GetType().GetProperty("Value");
+                if (valueProp != null)
+                {
+                    string refValue = valueProp.GetValue(item) as string;
+                    if (refValue == fwName)
+                    {
+                        fwRefToRemove = item;
+                        break;
+                    }
+                }
+            }
+
+            // If found, remove it from the other node
+            if (fwRefToRemove != null)
+            {
+                MethodInfo removeMethod = fwRefsCollection.GetType().GetMethod("Remove");
+                if (removeMethod != null)
+                {
+                    bool removed = (bool)removeMethod.Invoke(fwRefsCollection, new object[] { fwRefToRemove });
+                    if (removed)
+                    {
+                        log.WriteLine($"    ⚠ REMAPPED: Removed '{fwName}' from NODE '{otherNode.NAME}' (already existed)");
+                        log.WriteLine($"    ✓ Now mapping '{fwName}' to NODE '{currentNodeName}' (new mapping)");
+                        
+                        // CRITICAL: Persist the removal to database
+                        try
+                        {
+                            bool persistSuccess = nodeAH.ModifyAdd(otherNode);
+                            if (persistSuccess)
+                            {
+                                log.WriteLine($"    ✓ PERSISTED: Removal from '{otherNode.NAME}' saved to database");
+                            }
+                            else
+                            {
+                                log.WriteLine($"    ⚠ WARNING: ModifyAdd returned False for '{otherNode.NAME}' - removal may not be persisted");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            log.WriteLine($"    ✗ ERROR: Failed to persist removal from '{otherNode.NAME}': {ex.Message}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private DDB.KEYLIST UpdateKeylistValue(DDB.KEYLIST keylist, string keyname, string newValue)
+    {
+        if (keylist != null)
+        {
+            var index = keylist.ITEMCollection.ToList().FindIndex(it => it.key == keyname);
+            if (index != -1)
+            {
+                keylist.ITEMCollection[index].Value = newValue;
+            }
+            else
+            {
+                keylist.ITEMCollection.Add(new DDB.ITEM() { key = keyname, Value = newValue });
+            }
+        }
+        return keylist;
+    }
+
+    private int UpdateKeylistValueWithTracking(DDB.FAILURE_WORD fw, string keyname, string newValue, StreamWriter log, bool isNew)
+    {
+        if (fw.KEYLIST == null)
+            return 0;
+            
+        var index = fw.KEYLIST.ITEMCollection.ToList().FindIndex(it => it.key == keyname);
+        string oldValue = null;
+        
+        if (index != -1)
+        {
+            oldValue = fw.KEYLIST.ITEMCollection[index].Value;
+            if (oldValue != newValue)
+            {
+                if (!isNew) log.WriteLine($"      KEYLIST[{keyname}]: '{oldValue}' -> '{newValue}'");
+                fw.KEYLIST.ITEMCollection[index].Value = newValue;
+                return 1;
+            }
+        }
+        else
+        {
+            if (!isNew) log.WriteLine($"      KEYLIST[{keyname}]: (new) -> '{newValue}'");
+            fw.KEYLIST.ITEMCollection.Add(new DDB.ITEM() { key = keyname, Value = newValue });
+            return 1;
+        }
+        
+        return 0;
+    }
+
+    private int UpdateNodeKeylistWithTracking(DDB.NODE node, string keyname, string newValue, StreamWriter log, bool isNew)
+    {
+        if (node.KEYLIST == null)
+            return 0;
+            
+        var index = node.KEYLIST.ITEMCollection.ToList().FindIndex(it => it.key == keyname);
+        string oldValue = null;
+        
+        if (index != -1)
+        {
+            oldValue = node.KEYLIST.ITEMCollection[index].Value;
+            if (oldValue != newValue)
+            {
+                if (!isNew) log.WriteLine($"      KEYLIST[{keyname}]: '{oldValue}' -> '{newValue}'");
+                node.KEYLIST.ITEMCollection[index].Value = newValue;
+                return 1;
+            }
+        }
+        else
+        {
+            if (!isNew) log.WriteLine($"      KEYLIST[{keyname}]: (new) -> '{newValue}'");
+            node.KEYLIST.ITEMCollection.Add(new DDB.ITEM() { key = keyname, Value = newValue });
+            return 1;
+        }
+        
+        return 0;
+    }
+
+    private void UpdateAutosarDebouncer(DDB.FAILURE_WORD fw, Dictionary<string, string> entry, StreamWriter log)
+    {
+        Type fwType = fw.GetType();
+        PropertyInfo autosarProp = fwType.GetProperty("AUTOSAR");
+        if (autosarProp == null)
+        {
+            log.WriteLine("    AUTOSAR property not found via reflection.");
+            return;
+        }
+
+        object autosarObj = autosarProp.GetValue(fw);
+        if (autosarObj == null)
+        {
+            Type autosarType = Type.GetType("com.bosch.Diamant.Diagnosis.AUTOSAR, com.bosch.Diamant.Diagnosis");
+            if (autosarType != null)
+            {
+                autosarObj = Activator.CreateInstance(autosarType);
+                autosarProp.SetValue(fw, autosarObj);
+            }
+            else
+            {
+                return;
+            }
+        }
+
+        Type autosarObjType = autosarObj.GetType();
+
+        PropertyInfo eventPriorityProp = autosarObjType.GetProperty("EventPriority");
+        if (eventPriorityProp != null && entry.TryGetValue("EventPriority", out var vEP) && !string.IsNullOrWhiteSpace(vEP))
+        {
+            eventPriorityProp.SetValue(autosarObj, vEP);
+            log.WriteLine($"    Set EventPriority = {vEP}");
+        }
+
+        PropertyInfo debAlgProp = autosarObjType.GetProperty("DebouncerAlgorithm");
+        if (debAlgProp == null)
+        {
+            return;
+        }
+
+        object debAlgObj = debAlgProp.GetValue(autosarObj);
+        if (debAlgObj == null)
+        {
+            Type debAlgType = Type.GetType("com.bosch.Diamant.Diagnosis.DebouncerAlgorithm, com.bosch.Diamant.Diagnosis");
+            if (debAlgType != null)
+            {
+                debAlgObj = Activator.CreateInstance(debAlgType);
+                debAlgProp.SetValue(autosarObj, debAlgObj);
+            }
+            else
+            {
+                return;
+            }
+        }
+
+        Type debAlgObjType = debAlgObj.GetType();
+
+        PropertyInfo debTypeProp = debAlgObjType.GetProperty("DebouncerType");
+        if (debTypeProp != null)
+        {
+            string currentDebType = debTypeProp.GetValue(debAlgObj)?.ToString();
+            string newDebType = "MonitoringInternal";
+            
+            if (entry.TryGetValue("Debouncer type", out var vDebType) && !string.IsNullOrWhiteSpace(vDebType))
+            {
+                newDebType = vDebType;
+            }
+            
+            if (currentDebType != newDebType)
+            {
+                log.WriteLine($"    DebouncerType: '{currentDebType}' -> '{newDebType}'");
+                debTypeProp.SetValue(debAlgObj, newDebType);
+            }
+        }
+
+        PropertyInfo debCounterProp = debAlgObjType.GetProperty("DebouncerCounterbased");
+        if (debCounterProp == null)
+        {
+            return;
+        }
+
+        object debCounterObj = debCounterProp.GetValue(debAlgObj);
+        if (debCounterObj == null)
+        {
+            Type debCounterType = Type.GetType("com.bosch.Diamant.Diagnosis.DebouncerCounterbased, com.bosch.Diamant.Diagnosis");
+            if (debCounterType != null)
+            {
+                debCounterObj = Activator.CreateInstance(debCounterType);
+                debCounterProp.SetValue(debAlgObj, debCounterObj);
+            }
+            else
+            {
+                return;
+            }
+        }
+
+        Type debCounterObjType = debCounterObj.GetType();
+        PropertyInfo sampleProp = debCounterObjType.GetProperty("DebouncecounterIncrementstepsize");
+        if (sampleProp == null)
+        {
+            return;
+        }
+        
+        object existingValue = sampleProp.GetValue(debCounterObj);
+        Type lockableValueType = null;
+        
+        if (existingValue != null)
+            lockableValueType = existingValue.GetType();
+        else
+            lockableValueType = sampleProp.PropertyType;
+
+        // Update debouncer thresholds and step sizes
+        if (entry.TryGetValue("Increment step size", out var vInc) && !string.IsNullOrWhiteSpace(vInc))
+        {
+            PropertyInfo prop = debCounterObjType.GetProperty("DebouncecounterIncrementstepsize");
+            if (prop != null)
+            {
+                object lockableValue = Activator.CreateInstance(lockableValueType);
+                PropertyInfo valueProp = lockableValueType.GetProperty("Value");
+                if (valueProp != null)
+                {
+                    valueProp.SetValue(lockableValue, vInc);
+                    prop.SetValue(debCounterObj, lockableValue);
+                    log.WriteLine($"    Set Increment step size = {vInc}");
+                }
+            }
+        }
+
+        if (entry.TryGetValue("Decrement step size", out var vDec) && !string.IsNullOrWhiteSpace(vDec))
+        {
+            PropertyInfo prop = debCounterObjType.GetProperty("DebouncecounterDecrementstepsize");
+            if (prop != null)
+            {
+                object lockableValue = Activator.CreateInstance(lockableValueType);
+                PropertyInfo valueProp = lockableValueType.GetProperty("Value");
+                if (valueProp != null)
+                {
+                    valueProp.SetValue(lockableValue, vDec);
+                    prop.SetValue(debCounterObj, lockableValue);
+                    log.WriteLine($"    Set Decrement step size = {vDec}");
+                }
+            }
+        }
+
+        if (entry.TryGetValue("Failed threshold", out var vFth) && !string.IsNullOrWhiteSpace(vFth))
+        {
+            PropertyInfo prop = debCounterObjType.GetProperty("DebouncecounterFailedthreshold");
+            if (prop != null)
+            {
+                object lockableValue = Activator.CreateInstance(lockableValueType);
+                PropertyInfo valueProp = lockableValueType.GetProperty("Value");
+                if (valueProp != null)
+                {
+                    valueProp.SetValue(lockableValue, vFth);
+                    prop.SetValue(debCounterObj, lockableValue);
+                    log.WriteLine($"    Set Failed threshold = {vFth}");
+                }
+            }
+        }
+
+        if (entry.TryGetValue("Passed threshold", out var vPth) && !string.IsNullOrWhiteSpace(vPth))
+        {
+            PropertyInfo prop = debCounterObjType.GetProperty("DebouncecounterPassedthreshold");
+            if (prop != null)
+            {
+                object lockableValue = Activator.CreateInstance(lockableValueType);
+                PropertyInfo valueProp = lockableValueType.GetProperty("Value");
+                if (valueProp != null)
+                {
+                    valueProp.SetValue(lockableValue, vPth);
+                    prop.SetValue(debCounterObj, lockableValue);
+                    log.WriteLine($"    Set Passed threshold = {vPth}");
+                }
+            }
+        }
+
+        // Handle jump values
+        if (entry.TryGetValue("Jump up value", out var vJup) && !string.IsNullOrWhiteSpace(vJup))
+        {
+            PropertyInfo prop = debCounterObjType.GetProperty("DebouncecounterJumpupvalue");
+            if (prop != null)
+            {
+                object lockableValue = Activator.CreateInstance(lockableValueType);
+                PropertyInfo valueProp = lockableValueType.GetProperty("Value");
+                if (valueProp != null)
+                {
+                    valueProp.SetValue(lockableValue, vJup);
+                    prop.SetValue(debCounterObj, lockableValue);
+                    log.WriteLine($"    Set Jump up value = {vJup}");
+                }
+            }
+        }
+
+        if (entry.TryGetValue("Jump down value", out var vJdown) && !string.IsNullOrWhiteSpace(vJdown))
+        {
+            PropertyInfo prop = debCounterObjType.GetProperty("DebouncecounterJumpdownvalue");
+            if (prop != null)
+            {
+                object lockableValue = Activator.CreateInstance(lockableValueType);
+                PropertyInfo valueProp = lockableValueType.GetProperty("Value");
+                if (valueProp != null)
+                {
+                    valueProp.SetValue(lockableValue, vJdown);
+                    prop.SetValue(debCounterObj, lockableValue);
+                    log.WriteLine($"    Set Jump down value = {vJdown}");
+                }
+            }
+        }
+    }
+
+    private void UpdateMonitoring(DDB.FAILURE_WORD fw, Dictionary<string, string> entry, StreamWriter log)
+    {
+        Type fwType = fw.GetType();
+        PropertyInfo monitoringProp = fwType.GetProperty("MONITORING");
+        if (monitoringProp == null)
+        {
+            return;
+        }
+
+        object monitoringObj = monitoringProp.GetValue(fw);
+        if (monitoringObj == null)
+        {
+            Type monitoringType = Type.GetType("com.bosch.Diamant.Diagnosis.MONITORING, com.bosch.Diamant.Diagnosis");
+            if (monitoringType != null)
+            {
+                monitoringObj = Activator.CreateInstance(monitoringType);
+                monitoringProp.SetValue(fw, monitoringObj);
+            }
+            else
+            {
+                return;
+            }
+        }
+
+        Type monitoringObjType = monitoringObj.GetType();
+
+        // Update ROOTCAUSE
+        PropertyInfo rootCauseProp = monitoringObjType.GetProperty("ROOTCAUSE");
+        if (rootCauseProp != null)
+        {
+            string rootCause = null;
+            if (entry.TryGetValue("Rootcause", out var vRoot) && !string.IsNullOrWhiteSpace(vRoot))
+                rootCause = vRoot;
+            else if (entry.TryGetValue("Description", out var vDesc) && !string.IsNullOrWhiteSpace(vDesc))
+                rootCause = vDesc;
+            
+            if (!string.IsNullOrWhiteSpace(rootCause))
+            {
+                try
+                {
+                    rootCauseProp.SetValue(monitoringObj, rootCause);
+                }
+                catch
+                {
+                    Type lockableValueType = Type.GetType("com.bosch.Diamant.Diagnosis.LockableValue, com.bosch.Diamant.Diagnosis");
+                    if (lockableValueType != null)
+                    {
+                        object lockableValue = Activator.CreateInstance(lockableValueType);
+                        PropertyInfo valueProp = lockableValueType.GetProperty("Value");
+                        if (valueProp != null)
+                        {
+                            valueProp.SetValue(lockableValue, rootCause);
+                            rootCauseProp.SetValue(monitoringObj, lockableValue);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private void UpdateTestComplete(DDB.FAILURE_WORD fw, Dictionary<string, string> entry, StreamWriter log)
+    {
+        Type fwType = fw.GetType();
+        PropertyInfo testCompleteProp = fwType.GetProperty("TEST_COMPLETE");
+        if (testCompleteProp == null)
+        {
+            return;
+        }
+
+        object testCompleteObj = testCompleteProp.GetValue(fw);
+        if (testCompleteObj == null)
+        {
+            Type testCompleteType = Type.GetType("com.bosch.Diamant.Diagnosis.TEST_COMPLETE, com.bosch.Diamant.Diagnosis");
+            if (testCompleteType != null)
+            {
+                testCompleteObj = Activator.CreateInstance(testCompleteType);
+                testCompleteProp.SetValue(fw, testCompleteObj);
+            }
+            else
+            {
+                return;
+            }
+        }
+
+        Type testCompleteObjType = testCompleteObj.GetType();
+        PropertyInfo tcManeuverProp = testCompleteObjType.GetProperty("TC_MANEUVER_REF");
+        if (tcManeuverProp != null)
+        {
+            string tcManeuver = entry.TryGetValue("TC_MANEUVER_REF", out var vTc) && !string.IsNullOrWhiteSpace(vTc) ? vTc : "TCMAN_IgnitionOn_Wait5s";
+            
+            object currentValue = tcManeuverProp.GetValue(testCompleteObj);
+            Type wrapperType = (currentValue != null) ? currentValue.GetType() : tcManeuverProp.PropertyType;
+            
+            object wrapperValue = Activator.CreateInstance(wrapperType);
+            PropertyInfo valueProp = wrapperType.GetProperty("Value");
+            if (valueProp != null)
+            {
+                valueProp.SetValue(wrapperValue, tcManeuver);
+                tcManeuverProp.SetValue(testCompleteObj, wrapperValue);
+            }
+            else
+            {
+                tcManeuverProp.SetValue(testCompleteObj, tcManeuver);
+            }
+        }
+    }
+
+    private bool ProcessGraphLinks(DPP.IContext ctx, string inputFile, StreamWriter loginfo)
+    {
+        try
+        {
+            // Parse input file for Graph Links
+            string[] lines = File.ReadAllLines(inputFile);
+            var entries = new List<Dictionary<string, string>>();
+            Dictionary<string, string> current = null;
+
+            foreach (var raw in lines)
+            {
+                var l = raw ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(l))
+                {
+                    if (current != null && current.Count > 0)
+                    {
+                        entries.Add(current);
+                        current = null;
+                    }
+                    continue;
+                }
+
+                int idx = l.IndexOf(':');
+                if (idx > 0)
+                {
+                    string key = l.Substring(0, idx).Trim();
+                    string val = l.Substring(idx + 1).Trim();
+
+                    // Handle single-line link syntax: Link: A -> B
+                    if (string.Equals(key, "Link", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var arrow = val.Split(new[] { "->" }, StringSplitOptions.None);
+                        if (arrow.Length == 2)
+                        {
+                            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                            dict["Source"] = arrow[0].Trim();
+                            dict["Target"] = arrow[1].Trim();
+                            entries.Add(dict);
+                        }
+                        else
+                        {
+                            ctx.IO.ConsoleWrite("Warn", $"Invalid link format: {val}");
+                            loginfo.WriteLine($"WARNING: Invalid link format: {val}");
+                        }
+                    }
+                    else
+                    {
+                        if (current == null)
+                            current = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        
+                        if (!current.ContainsKey(key))
+                            current[key] = val;
+                        else
+                            current[key] = current[key] + "\\n" + val;
+                    }
+                }
+            }
+
+            if (current != null && current.Count > 0)
+                entries.Add(current);
+
+            if (entries.Count == 0)
+            {
+                ctx.IO.ConsoleWrite("Error", "No valid link entries found in the file.");
+                loginfo.WriteLine("ERROR: No valid link entries found in the file.");
+                return false;
+            }
+
+            ctx.IO.ConsoleWrite("Info", $"Parsed {entries.Count} link entries from input file.");
+            loginfo.WriteLine($"Parsed {entries.Count} link entries from input file.\\n");
+
+            // Initialize NODE_LINK handler
+            var linkAH = ctx.Handlers["NODE_LINK"];
+            if (null == linkAH)
+            {
+                throw new Exception("NODE_LINK access handler does not exist.");
+            }
+
+            List<DDB.NODE_LINK> linkCompList = new List<DDB.NODE_LINK>();
+            foreach (string linkKey in linkAH.GetAllKeys())
+            {
+                DDB.NODE_LINK getLinkParams = (DDB.NODE_LINK)linkAH.Get(linkKey);
+                if (null != getLinkParams)
+                    linkCompList.Add(getLinkParams);
+            }
+            loginfo.WriteLine($"Retrieved {linkCompList.Count} existing NODE_LINK entries from database.\\n");
+
+            // Process each link entry
+            int createdCount = 0;
+            int existingCount = 0;
+
+            foreach (var entry in entries)
+            {
+                // Extract source and target nodes
+                string source = null, target = null;
+
+                // Try explicit Source/Target first
+                if (entry.TryGetValue("Source", out var sVal) && !string.IsNullOrWhiteSpace(sVal))
+                    source = sVal.Trim();
+                if (entry.TryGetValue("Target", out var tVal) && !string.IsNullOrWhiteSpace(tVal))
+                    target = tVal.Trim();
+
+                // Support node-style blocks where "Node name" is the target and "Parent" is the source
+                if (string.IsNullOrWhiteSpace(target))
+                {
+                    if (entry.TryGetValue("Node name", out var nn) && !string.IsNullOrWhiteSpace(nn))
+                        target = nn.Trim();
+                    else if (entry.TryGetValue("Node", out var nn2) && !string.IsNullOrWhiteSpace(nn2))
+                        target = nn2.Trim();
+                }
+
+                if (string.IsNullOrWhiteSpace(source))
+                {
+                    if (entry.TryGetValue("Parent", out var p1) && !string.IsNullOrWhiteSpace(p1))
+                        source = p1.Trim();
+                    else if (entry.TryGetValue("Parent Node", out var p2) && !string.IsNullOrWhiteSpace(p2))
+                        source = p2.Trim();
+                }
+
+                if (string.IsNullOrWhiteSpace(source) || string.IsNullOrWhiteSpace(target))
+                {
+                    ctx.IO.ConsoleWrite("Warn", "Skipping entry missing Source or Target");
+                    loginfo.WriteLine("WARNING: Skipping entry missing Source or Target.\\n");
+                    continue;
+                }
+
+                loginfo.WriteLine($"Processing NODE_LINK: {source} -> {target}");
+
+                // Check if NODE_LINK exists
+                DDB.NODE_LINK linkToProcess = linkCompList.FirstOrDefault(l => 
+                    l.source == source && l.target == target);
+
+                if (linkToProcess == null)
+                {
+                    // Create new NODE_LINK
+                    ctx.IO.ConsoleWrite("Info", $"Creating NODE_LINK: {source} -> {target}");
+                    loginfo.WriteLine($"  Creating new NODE_LINK object.");
+
+                    linkToProcess = new DDB.NODE_LINK();
+                    linkToProcess.source = source;
+                    linkToProcess.target = target;
+
+                    // Add to database
+                    bool addResult = linkAH.ModifyAdd(linkToProcess);
+                    loginfo.WriteLine($"  ModifyAdd operation returned: {addResult}\\n");
+                    
+                    createdCount++;
+                }
+                else
+                {
+                    // NODE_LINK already exists
+                    ctx.IO.ConsoleWrite("Info", $"Link already exists: {source} -> {target}");
+                    loginfo.WriteLine($"  Link already exists in database.\\n");
+                    existingCount++;
+                }
+            }
+
+            loginfo.WriteLine("\\nGraph Link processing completed!");
+            loginfo.WriteLine($"Total NODE_LINKs created: {createdCount}");
+            loginfo.WriteLine($"Total NODE_LINKs already existing: {existingCount}");
+
+            ctx.IO.ConsoleWrite("Info", $"Graph Link processing completed! Created: {createdCount}, Existing: {existingCount}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            ctx.IO.ConsoleWrite("Error", $"Graph Links processing failed: {ex.Message}");
+            loginfo.WriteLine($"ERROR in ProcessGraphLinks: {ex.Message}\\n{ex.StackTrace}");
+            return false;
+        }
+    }
+
+    private static string Sanitize(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        var tmp = s.Trim().Replace(' ', '_');
+        var chars = tmp.ToCharArray().Where(c => char.IsLetterOrDigit(c) || c == '_' || c == '-');
+        return new string(chars.ToArray());
+    }
+}

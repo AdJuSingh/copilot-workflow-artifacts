@@ -1,0 +1,106 @@
+name: "5 · Fetch GitHub Clone Stats"
+
+# Fetches real clone counts from GitHub Traffic API and updates
+# window._META.clones in docs/dashboard/workflows.js, then commits back.
+#
+# GITHUB_TOKEN is automatically provided by GitHub — no manual token creation needed.
+# Repo name is read from window._META.repo inside workflows.js.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch:        # also runnable manually from Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  update-clones:
+    name: Fetch clone stats and update workflows.js
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}   # auto-provided — no setup needed
+
+      - name: Read repo name from workflows.js _META
+        id: meta
+        run: |
+          REPO=$(grep -oP 'repo\s*:\s*"\K[^"]+' docs/dashboard/workflows.js | head -1)
+          if [ -z "$REPO" ]; then
+            echo "ERROR: repo field not found in window._META in workflows.js"
+            exit 1
+          fi
+          echo "repo=$REPO" >> $GITHUB_OUTPUT
+          echo "Using repo: $REPO"
+
+      - name: Fetch clone stats from GitHub Traffic API
+        id: clones
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO:     ${{ steps.meta.outputs.repo }}
+        run: |
+          RESPONSE=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/$REPO/traffic/clones")
+
+          echo "API response: $RESPONSE"
+
+          COUNT=$(echo "$RESPONSE"  | grep -o '"count":[0-9]*'  | head -1 | cut -d: -f2)
+          UNIQUE=$(echo "$RESPONSE" | grep -o '"uniques":[0-9]*' | head -1 | cut -d: -f2)
+          COUNT=${COUNT:-0}
+          UNIQUE=${UNIQUE:-0}
+          AS_OF=$(date "+%b %Y")
+
+          echo "count=$COUNT"   >> $GITHUB_OUTPUT
+          echo "unique=$UNIQUE" >> $GITHUB_OUTPUT
+          echo "asof=$AS_OF"    >> $GITHUB_OUTPUT
+          echo "Fetched: count=$COUNT unique=$UNIQUE asOf=$AS_OF"
+
+      - name: Patch workflows.js
+        env:
+          REPO:   ${{ steps.meta.outputs.repo }}
+          COUNT:  ${{ steps.clones.outputs.count }}
+          UNIQUE: ${{ steps.clones.outputs.unique }}
+          AS_OF:  ${{ steps.clones.outputs.asof }}
+        run: |
+          python3 - <<'PYEOF'
+          import os, re
+
+          path   = "docs/dashboard/workflows.js"
+          repo   = os.environ["REPO"]
+          count  = os.environ["COUNT"]
+          unique = os.environ["UNIQUE"]
+          as_of  = os.environ["AS_OF"]
+
+          with open(path, encoding="utf-8") as f:
+              content = f.read()
+
+          new_block = (
+              'window._META = {\n'
+              f'  repo:   "{repo}",  // GitHub owner/repo\n'
+              f'  clones: {{ count: {count}, unique: {unique}, asOf: "{as_of}" }}\n'
+              '  // count/unique/asOf are updated automatically -- do not edit by hand\n'
+              '};'
+          )
+          updated = re.sub(r'window\._META\s*=\s*\{[\s\S]*?\n\};', new_block, content)
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(updated)
+
+          print(f"Updated: count={count}, unique={unique}, asOf={as_of}")
+          PYEOF
+
+      - name: Commit if changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/dashboard/workflows.js
+          if git diff --cached --quiet; then
+            echo "No change in clone counts -- nothing to commit."
+          else
+            git commit -m "chore(dashboard): update clone stats [skip ci]"
+            git push
+          fi

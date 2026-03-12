@@ -1,0 +1,367 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>GHCP Agent Status Dashboard</title>
+  <style>
+    :root{
+      --bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;
+      --text:#e6edf3;--muted:#8b949e;--accent:#58a6ff;
+      --live:#3fb950;--live-bg:rgba(63,185,80,.10);
+      --pilot:#d29922;--pilot-bg:rgba(210,153,34,.10);
+      --indev:#58a6ff;--indev-bg:rgba(88,166,255,.10);
+      --planned:#8b949e;--planned-bg:rgba(139,148,158,.10);
+    }
+    *{box-sizing:border-box;margin:0;padding:0;}
+    body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh;padding:1.5rem 2rem 3rem;}
+
+    /* ── Header ── */
+    header{display:flex;align-items:center;gap:1rem;border-bottom:1px solid var(--border);padding-bottom:1.25rem;margin-bottom:1.5rem;}
+    header .logo{font-size:1.9rem;}
+    header h1{font-size:1.35rem;font-weight:700;}
+    header p{font-size:0.78rem;color:var(--muted);margin-top:.15rem;}
+    .meta{margin-left:auto;text-align:right;font-size:.75rem;color:var(--muted);}
+    .meta strong{color:var(--text);}
+
+    /* ── Summary strip ── */
+    .summary{display:flex;gap:.75rem;flex-wrap:wrap;margin-bottom:1.5rem;}
+    .s-card{flex:1;min-width:130px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:.85rem 1rem;text-align:center;}
+    .s-card .cnt{font-size:1.8rem;font-weight:700;}
+    .s-card .lbl{font-size:.68rem;color:var(--muted);margin-top:.2rem;text-transform:uppercase;letter-spacing:.06em;}
+    .s-card .bubble{display:inline-block;}
+    .s-card.live .cnt{color:var(--live);}
+    .s-card.pilot .cnt{color:var(--pilot);}
+    .s-card.indev .cnt{color:var(--indev);}
+    .s-card.total .cnt{color:var(--text);}
+    .s-card.clones .cnt{color:#a78bfa;}
+    .s-card.clones .lbl-sub{font-size:.62rem;color:var(--muted);margin-top:.1rem;}
+    .s-card.live  .bubble{animation:blink-live  1.4s ease-in-out infinite;}
+    .s-card.pilot .bubble{animation:blink-pilot 2s   ease-in-out infinite;}
+    .s-card.indev .bubble{animation:blink-indev 2.6s ease-in-out infinite;}
+    @keyframes blink-live {0%,100%{opacity:1}50%{opacity:.2}}
+    @keyframes blink-pilot{0%,100%{opacity:1}50%{opacity:.2}}
+    @keyframes blink-indev{0%,100%{opacity:1}50%{opacity:.2}}
+
+    /* ── Domain tabs ── */
+    .tabs{display:flex;gap:.5rem;margin-bottom:1.25rem;flex-wrap:wrap;}
+    .tab{display:flex;align-items:center;gap:.45rem;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:.45rem 1rem;cursor:pointer;font-size:.84rem;font-weight:500;transition:border-color .15s,background .15s;}
+    .tab:hover{border-color:var(--accent);background:var(--surface2);}
+    .tab.active{border-color:var(--accent);background:var(--indev-bg);color:var(--accent);}
+    .dbadge{font-size:.62rem;padding:.15rem .5rem;border-radius:20px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;}
+    .dbadge.live   {background:var(--live-bg);  color:var(--live);  border:1px solid var(--live);}
+    .dbadge.indev  {background:var(--indev-bg); color:var(--indev); border:1px solid var(--indev);}
+    .dbadge.planned{background:var(--planned-bg);color:var(--planned);border:1px solid var(--planned);}
+    .tab .acnt{font-size:.68rem;color:var(--muted);}
+
+    /* ── Panel ── */
+    .panel{display:none;}
+    .panel.active{display:block;}
+
+    .domain-header{display:flex;align-items:baseline;gap:.75rem;margin-bottom:1rem;}
+    .domain-header h2{font-size:.95rem;font-weight:600;}
+    .domain-header p{font-size:.76rem;color:var(--muted);}
+
+    /* ── Expand/Collapse all bar ── */
+    .ctrl-bar{display:flex;align-items:center;justify-content:flex-end;gap:.5rem;margin-bottom:.75rem;}
+    .ctrl-btn{background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:.72rem;padding:.25rem .7rem;cursor:pointer;transition:border-color .15s,color .15s;}
+    .ctrl-btn:hover{border-color:var(--accent);color:var(--accent);}
+
+    /* ── Workflow grid ── */
+    .workflows{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:.85rem;align-items:start;}
+
+    /* ── Workflow card ── */
+    .wf-card{background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:box-shadow .15s;}
+    .wf-card:hover{box-shadow:0 2px 12px rgba(0,0,0,.35);}
+
+    .wf-header{
+      display:flex;align-items:center;gap:.6rem;
+      padding:.7rem 1rem;
+      cursor:pointer;
+      user-select:none;
+      background:var(--surface2);
+      border-bottom:1px solid var(--border);
+      transition:background .12s;
+    }
+    .wf-header:hover{background:#21262d;}
+    .wf-toggle{font-size:.7rem;color:var(--muted);transition:transform .2s;flex-shrink:0;}
+    .wf-card.open .wf-toggle{transform:rotate(90deg);}
+    .wf-title{font-size:.84rem;font-weight:700;flex:1;}
+    .wf-sub{font-size:.65rem;color:var(--muted);margin-top:.08rem;}
+
+    /* ── Count pill in header ── */
+    .wf-count{
+      min-width:26px;height:22px;
+      border-radius:20px;
+      font-size:.65rem;font-weight:700;
+      display:flex;align-items:center;justify-content:center;
+      padding:0 .45rem;
+      flex-shrink:0;
+    }
+    .wf-count.live   {background:var(--live-bg);  color:var(--live);  border:1px solid var(--live);}
+    .wf-count.pilot  {background:var(--pilot-bg); color:var(--pilot); border:1px solid var(--pilot);}
+    .wf-count.indev  {background:var(--indev-bg); color:var(--indev); border:1px solid var(--indev);}
+    .wf-count.planned{background:var(--planned-bg);color:var(--planned);border:1px solid var(--planned);}
+
+    /* ── Status badge ── */
+    .wf-badge{font-size:.6rem;font-weight:600;padding:.18rem .5rem;border-radius:20px;text-transform:uppercase;letter-spacing:.04em;display:inline-flex;align-items:center;gap:.3rem;flex-shrink:0;}
+    .wf-badge.live   {background:var(--live-bg);  color:var(--live);  border:1px solid var(--live);}
+    .wf-badge.pilot  {background:var(--pilot-bg); color:var(--pilot); border:1px solid var(--pilot);}
+    .wf-badge.indev  {background:var(--indev-bg); color:var(--indev); border:1px solid var(--indev);}
+    .wf-badge.planned{background:var(--planned-bg);color:var(--planned);border:1px solid var(--planned);}
+
+    .wf-dot{width:5px;height:5px;border-radius:50%;display:inline-block;}
+    .wf-dot.live  {background:var(--live); box-shadow:0 0 5px var(--live); animation:blink-live  1.4s ease-in-out infinite;}
+    .wf-dot.pilot {background:var(--pilot);box-shadow:0 0 5px var(--pilot);animation:blink-pilot 2s   ease-in-out infinite;}
+    .wf-dot.indev {background:var(--indev);box-shadow:0 0 5px var(--indev);animation:blink-indev 2.6s ease-in-out infinite;}
+    .wf-dot.planned{background:var(--planned);}
+
+    /* ── Collapsible body ── */
+    .wf-body{max-height:0;overflow:hidden;transition:max-height .3s ease;}
+    .wf-card.open .wf-body{max-height:2000px;}
+
+    .agents-list{padding:.35rem 0;}
+    .agent-row{display:flex;align-items:center;gap:.55rem;padding:.38rem .9rem;border-bottom:1px solid rgba(48,54,61,.5);transition:background .1s;}
+    .agent-row:last-child{border-bottom:none;}
+    .agent-row:hover{background:var(--surface2);}
+    .step-num{min-width:22px;height:22px;border-radius:50%;background:rgba(88,166,255,.1);color:var(--muted);font-size:.6rem;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+    .agent-name-text{font-size:.78rem;}
+    .agent-file{font-size:.6rem;color:var(--muted);margin-top:.06rem;font-family:monospace;}
+    .mini-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0;}
+    .mini-dot.live {background:var(--live);}
+    .mini-dot.pilot{background:var(--pilot);}
+    .mini-dot.indev{background:var(--indev);}
+
+    /* ── Placeholder ── */
+    .domain-placeholder{background:var(--surface);border:1px dashed var(--border);border-radius:10px;padding:2.5rem 2rem;text-align:center;color:var(--muted);}
+    .domain-placeholder .ph-icon{font-size:2.2rem;margin-bottom:.65rem;}
+    .domain-placeholder h3{font-size:.95rem;color:var(--text);margin-bottom:.45rem;}
+    .domain-placeholder p{font-size:.8rem;line-height:1.65;}
+
+    footer{margin-top:2.5rem;text-align:center;font-size:.7rem;color:var(--muted);border-top:1px solid var(--border);padding-top:1rem;}
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="logo">&#x1F916;</div>
+  <div>
+    <h1>GHCP Orchestrated Workflow &mdash; Agent Status</h1>
+    <p>Prompt-based agents across VM domains &middot; Grouped by domain, layer &amp; workflow</p>
+  </div>
+  <div class="meta">Last refreshed<br/><strong id="timestamp"></strong></div>
+</header>
+
+<!-- Summary strip -->
+<div class="summary">
+  <div class="s-card total"><div class="cnt" id="cnt-total">0</div><div class="lbl">Total Agents</div></div>
+  <div class="s-card live" ><div class="cnt" id="cnt-live" >0</div><div class="lbl"><span class="bubble">&#x1F7E2;</span> Live</div></div>
+  <div class="s-card pilot"><div class="cnt" id="cnt-pilot">0</div><div class="lbl"><span class="bubble">&#x1F7E1;</span> Pilot</div></div>
+  <div class="s-card indev"><div class="cnt" id="cnt-indev">0</div><div class="lbl"><span class="bubble">&#x1F535;</span> In Development</div></div>
+  <div class="s-card clones">
+    <div class="cnt" id="cnt-clones">—</div>
+    <div class="lbl">&#x1F4E6; Repo Clones</div>
+    <div class="lbl-sub" id="cnt-clones-sub"></div>
+  </div>
+</div>
+
+<!-- Domain tabs -->
+<div class="tabs">
+  <div class="tab active" data-panel="vmbs">
+    &#x1F6DE; Brake Systems
+    <span class="dbadge live">vm-bs</span>
+    <span class="acnt" id="tab-cnt-vmbs"></span>
+  </div>
+  <div class="tab" data-panel="vmoss">
+    &#x1F6E1;&#xFE0F; Occupant Safety
+    <span class="dbadge indev">vm-oss</span>
+    <span class="acnt" id="tab-cnt-vmoss"></span>
+  </div>
+  <div class="tab" data-panel="vmst">
+    &#x1F699; Steering Systems
+    <span class="dbadge planned">vm-st</span>
+    <span class="acnt" id="tab-cnt-vmst"></span>
+  </div>
+</div>
+
+<!-- vm-bs -->
+<div class="panel active" id="panel-vmbs">
+  <div class="domain-header">
+    <h2>Brake Systems (vm-bs)</h2>
+    <p>3 workflows</p>
+  </div>
+  <div class="ctrl-bar">
+    <button class="ctrl-btn" onclick="setAll('vmbs',true)">&#9660; Expand All</button>
+    <button class="ctrl-btn" onclick="setAll('vmbs',false)">&#9650; Collapse All</button>
+  </div>
+  <div class="workflows" id="workflows-vmbs"></div>
+</div>
+
+<!-- vm-oss -->
+<div class="panel" id="panel-vmoss">
+  <div class="domain-placeholder">
+    <div class="ph-icon">&#x1F535;</div>
+    <h3>Occupant Safety Systems (vm-oss)</h3>
+    <p>Domain folder structure is in place.<br/>Agent prompt development is actively underway.<br/>Workflows for ISW/DCOM, ISW/DSM, ASW and HSW are planned.</p>
+    <br/>
+    <span class="wf-badge indev" style="display:inline-flex;margin:auto;"><span class="wf-dot indev"></span>In Development</span>
+  </div>
+</div>
+
+<!-- vm-st -->
+<div class="panel" id="panel-vmst">
+  <div class="domain-placeholder">
+    <div class="ph-icon">&#x26AA;</div>
+    <h3>Steering Systems (vm-st)</h3>
+    <p>Domain scoped and folder structure created.<br/>Agent development is yet to be prioritized.</p>
+    <br/>
+    <span class="wf-badge planned" style="display:inline-flex;margin:auto;">Planned</span>
+  </div>
+</div>
+
+<footer>Source: <code>platform/</code> prompt files &mdash; GHCP Orchestrated Workflow Repository</footer>
+
+<!-- ✏️  To add/remove/update agents: edit workflows.js (same folder). -->
+
+<script>
+const labels = {live:"Live",pilot:"Pilot",indev:"In Development",planned:"Planned"};
+
+function renderDashboard(workflows) {
+  // counts
+  let total=0,live=0,pilot=0,indev=0;
+  workflows.forEach(w=>{
+    total+=w.agents.length;
+    if(w.status==="live")  live +=w.agents.length;
+    if(w.status==="pilot") pilot+=w.agents.length;
+    if(w.status==="indev") indev+=w.agents.length;
+  });
+  document.getElementById("cnt-total").textContent=total;
+  document.getElementById("cnt-live").textContent=live;
+  document.getElementById("cnt-pilot").textContent=pilot;
+  document.getElementById("cnt-indev").textContent=indev;
+
+  // per-domain agent counts for tab badges
+  const domainCounts={};
+  workflows.forEach(w=>{
+    domainCounts[w.domain]=(domainCounts[w.domain]||0)+w.agents.length;
+  });
+  const vmbsCount=domainCounts["vmbs"]||0;
+  document.getElementById("tab-cnt-vmbs").textContent=vmbsCount+" agents";
+  document.getElementById("tab-cnt-vmoss").textContent="In Dev";
+  document.getElementById("tab-cnt-vmst").textContent="Planned";
+
+  // clear existing cards before re-render
+  document.querySelectorAll(".workflows").forEach(c=>c.innerHTML="");
+
+  // render cards
+  workflows.forEach(wf=>{
+    const container=document.getElementById("workflows-"+wf.domain);
+    if(!container)return;
+
+    const card=document.createElement("div");
+    card.className="wf-card";
+    card.dataset.domain=wf.domain;
+    card.dataset.id=wf.id;
+
+    card.innerHTML=`
+      <div class="wf-header" onclick="toggleCard(this.parentElement)">
+        <span class="wf-toggle">&#9658;</span>
+        <div style="flex:1;min-width:0">
+          <div class="wf-title">${wf.title}</div>
+          <div class="wf-sub">${wf.sub}</div>
+        </div>
+        <span class="wf-count ${wf.status}">${wf.agents.length}</span>
+        <span class="wf-badge ${wf.status}"><span class="wf-dot ${wf.status}"></span>${labels[wf.status]}</span>
+      </div>
+      <div class="wf-body">
+        <div class="agents-list"></div>
+      </div>`;
+
+    container.appendChild(card);
+
+    const list=card.querySelector(".agents-list");
+    wf.agents.forEach(a=>{
+      const row=document.createElement("div");
+      row.className="agent-row";
+      row.innerHTML=`
+        <div class="step-num">${a.step}</div>
+        <div style="flex:1;min-width:0">
+          <div class="agent-name-text">${a.name}</div>
+          <div class="agent-file">${a.file}</div>
+        </div>
+        <div class="mini-dot ${wf.status}"></div>`;
+      list.appendChild(row);
+    });
+  });
+}
+
+function updateTimestamp() {
+  document.getElementById("timestamp").textContent=
+    new Date().toLocaleString("en-GB",{dateStyle:"medium",timeStyle:"short"});
+}
+
+function showLoadError(msg) {
+  document.getElementById("workflows-vmbs").innerHTML=
+    `<div style="color:var(--muted);font-size:.82rem;padding:1rem;border:1px dashed var(--border);border-radius:8px;">
+      ⚠️ Could not load workflow data: <code>${msg}</code><br/>
+      <small>Ensure <code>workflows.json</code> is served alongside this file (e.g. via a local HTTP server).</small>
+    </div>`;
+}
+
+// ── Bootstrap: poll workflows.js every 5 s via dynamic injection ────────────
+// Appending ?t=<timestamp> gives each load a unique URL, defeating all caches.
+function loadWorkflows() {
+  const old = document.getElementById('_wf_script');
+  if (old) old.remove();
+  window._WORKFLOWS = undefined;
+  const s = document.createElement('script');
+  s.id  = '_wf_script';
+  s.src = 'workflows.js?t=' + Date.now();
+  s.onload = () => {
+    if (window._WORKFLOWS) {
+      renderDashboard(window._WORKFLOWS);
+    } else {
+      showLoadError('window._WORKFLOWS not defined in workflows.js');
+    }
+    // Clones card
+    const m = window._META && window._META.clones;
+    if (m) {
+      document.getElementById('cnt-clones').textContent = (m.count || 0).toLocaleString();
+      const sub = [];
+      if (m.unique != null) sub.push((m.unique || 0).toLocaleString() + ' unique');
+      if (m.asOf)           sub.push(m.asOf);
+      document.getElementById('cnt-clones-sub').textContent = sub.join(' · ');
+    }
+    updateTimestamp();
+  };
+  s.onerror = () => {
+    showLoadError('Could not load workflows.js — check the file exists next to the HTML.');
+    updateTimestamp();
+  };
+  document.head.appendChild(s);
+}
+
+loadWorkflows();
+setInterval(loadWorkflows, 5000);
+
+function toggleCard(card){
+  card.classList.toggle("open");
+}
+function setAll(domain,open){
+  document.querySelectorAll(`.wf-card[data-domain="${domain}"]`).forEach(c=>{
+    open ? c.classList.add("open") : c.classList.remove("open");
+  });
+}
+
+// tab switching
+document.querySelectorAll(".tab").forEach(tab=>{
+  tab.addEventListener("click",()=>{
+    document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+    document.querySelectorAll(".panel").forEach(p=>p.classList.remove("active"));
+    tab.classList.add("active");
+    document.getElementById("panel-"+tab.dataset.panel).classList.add("active");
+  });
+});
+</script>
+</body>
+</html>

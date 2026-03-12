@@ -1,0 +1,34 @@
+name: "1 · Artifact Format Validation"
+
+# Validates that every .prompt.md and .instructions.md file under platform/
+# is non-empty, has at least one Markdown heading, and has properly closed
+# YAML frontmatter (if a frontmatter block is present at all).
+
+on:
+  pull_request:
+    paths:
+      - "platform/**/*.prompt.md"
+      - "platform/**/*.instructions.md"
+  push:
+    branches: [main]
+    paths:
+      - "platform/**/*.prompt.md"
+      - "platform/**/*.instructions.md"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate artifact format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run format checks
+        run: python validations/scripts/check-artifact-format.py

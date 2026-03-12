@@ -1,0 +1,340 @@
+/// <name>Update STM Configuration (CLI)</name>
+/// <version>1.0</version>
+/// <author>Jayasri Masi Nanjappan</author>
+/// <description>
+/// Updates STM configuration in the Diamant database by degrading nodes to specified states.
+/// Searches through all STM_PROJECTLINKs and updates STM_NODE entries.
+/// This is the CLI-compatible version that reads input from environment variable.
+/// 
+/// Input format (text file):
+/// Node name: Node_VoltageHandler1
+/// Target states: ESPBase = EbdPumpless; AEB = Off; HHC = Off; HBA = Off
+/// 
+/// Node name: Node_BrakeTemperatureModel
+/// Target states: VLC_AD_Main = Off; CCO_HDC = RampOff
+/// 
+/// The plugin will:
+/// 1. Parse each node and its target states
+/// 2. Find all STM_PROJECTLINKs matching the target state names (stm_ref)
+/// 3. Add or update STM_NODE entries to degrade the node to the specified state
+/// 
+/// CLI Usage:
+/// Set environment variable DIAMANT_STM_INPUT_FILE to input file path, then run:
+/// DiamantProCLI.exe --READSPLITTER=... --RUNPLUGIN=Diamant_Update_STMConfig_CLI.dpp --WRITESPLITTERS --CONSOLEOUTPUT=ALL
+/// </description>
+/// <icon>{plugin.png}</icon>
+/// <entrypoint>DbLoad</entrypoint>
+
+using System;
+using System.Reflection;
+using DDB = com.bosch.Diamant.Diagnosis;
+using DPP = com.bosch.Diamant.Plugins;
+using com.bosch.Diamant.Plugins;
+using System.IO;
+using System.Collections.Generic;
+using System.Linq;
+
+public partial class Plugin : DPP.IPlugin
+{
+    public void Declare(DPP.IDeclarationContext ctx)
+    {
+        // No declarations required
+    }
+
+    public void Execute(DPP.IContext ctx)
+    {
+        using (StreamWriter loginfo = File.CreateText(ctx.SplitMerge.CurrentDirectory + @"\Diamant_Update_STMConfig_Log.txt"))
+        {
+            loginfo.WriteLine("Start of Diamant_Update_STMConfig (CLI) Execution...");
+            loginfo.WriteLine("Execution Time: " + DateTime.Now.ToString() + "\n");
+
+            try
+            {
+                // CLI mode - always use environment variable
+                string inputFile = Environment.GetEnvironmentVariable("DIAMANT_STM_INPUT_FILE");
+                
+                if (string.IsNullOrEmpty(inputFile))
+                {
+                    ctx.IO.ConsoleWrite("Error", "DIAMANT_STM_INPUT_FILE environment variable not set.");
+                    loginfo.WriteLine("ERROR: DIAMANT_STM_INPUT_FILE environment variable not set.");
+                    loginfo.WriteLine("Set the environment variable before running this plugin in CLI mode.");
+                    ctx.Succeed = false;
+                    return;
+                }
+
+                ctx.IO.ConsoleWrite("Info", "Using input file from environment variable: " + inputFile);
+                loginfo.WriteLine("Using input file from DIAMANT_STM_INPUT_FILE environment variable: " + inputFile);
+                
+                if (!File.Exists(inputFile))
+                {
+                    ctx.IO.ConsoleWrite("Error", "File not found: " + inputFile);
+                    loginfo.WriteLine("ERROR: File not found: " + inputFile);
+                    ctx.Succeed = false;
+                    return;
+                }
+
+                loginfo.WriteLine("Input file selected: " + inputFile + "\n");
+
+                // Parse input file
+                var stmConfigurations = ParseInputFile(inputFile, loginfo, ctx);
+                
+                if (stmConfigurations.Count == 0)
+                {
+                    ctx.IO.ConsoleWrite("Warn", "No valid STM configurations found in input file.");
+                    loginfo.WriteLine("WARNING: No valid STM configurations found in input file.");
+                    ctx.Succeed = false;
+                    return;
+                }
+
+                ctx.IO.ConsoleWrite("Info", "Parsed " + stmConfigurations.Count.ToString() + " node configuration(s) from input file.");
+                loginfo.WriteLine("Parsed " + stmConfigurations.Count.ToString() + " node configuration(s) from input file.\n");
+
+                // Get all STM_PROJECTLINK objects from database
+                loginfo.WriteLine("Initializing the STM_PROJECTLINK handler...");
+                var stmPrjAH = ctx.Handlers["STM_PROJECTLINK"];
+                if (stmPrjAH == null)
+                {
+                    ctx.IO.ConsoleWrite("Error", "Failed to get STM_PROJECTLINK accessor from database.");
+                    loginfo.WriteLine("ERROR: Failed to get STM_PROJECTLINK accessor from database.");
+                    ctx.Succeed = false;
+                    return;
+                }
+
+                var allStmProjectLinks = new System.Collections.Generic.List<DDB.STM_PROJECTLINK>();
+                foreach (string key in stmPrjAH.GetAllKeys())
+                {
+                    DDB.STM_PROJECTLINK prjLink = (DDB.STM_PROJECTLINK)stmPrjAH.Get(key);
+                    if (prjLink != null)
+                    {
+                        allStmProjectLinks.Add(prjLink);
+                    }
+                }
+                ctx.IO.ConsoleWrite("Info", "Found " + allStmProjectLinks.Count.ToString() + " STM_PROJECTLINK(s) in database.");
+                loginfo.WriteLine("Found " + allStmProjectLinks.Count.ToString() + " STM_PROJECTLINK(s) in database.\n");
+
+                int totalUpdates = 0;
+                int totalAdded = 0;
+                int totalSkipped = 0;
+
+                // Process each node configuration
+                foreach (var nodeConfig in stmConfigurations)
+                {
+                    string nodeName = nodeConfig.Key;
+                    var targetStates = nodeConfig.Value;
+
+                    ctx.IO.ConsoleWrite("Info", "Processing node: " + nodeName);
+                    loginfo.WriteLine("==========================================");
+                    loginfo.WriteLine("Processing node: " + nodeName);
+                    loginfo.WriteLine("Target states: " + string.Join("; ", targetStates.Select(ts => ts.Key + " = " + ts.Value)));
+
+                    // Process each target state for this node
+                    foreach (var targetState in targetStates)
+                    {
+                        string stmRef = targetState.Key;
+                        string stateRef = targetState.Value;
+
+                        // Find matching STM_PROJECTLINK
+                        var matchingProjectLink = allStmProjectLinks.FirstOrDefault(pl => 
+                            pl.stm_ref != null && pl.stm_ref.Equals(stmRef, StringComparison.OrdinalIgnoreCase));
+
+                        if (matchingProjectLink == null)
+                        {
+                            ctx.IO.ConsoleWrite("Warn", "  STM_PROJECTLINK not found for stm_ref='" + stmRef + "'. Skipping.");
+                            loginfo.WriteLine("  WARNING: STM_PROJECTLINK not found for stm_ref='" + stmRef + "'. Skipping.");
+                            totalSkipped++;
+                            continue;
+                        }
+
+                        loginfo.WriteLine("  Found STM_PROJECTLINK: stm_ref='" + matchingProjectLink.stm_ref + "'");
+
+                        // Check if STM_VAR exists
+                        if (matchingProjectLink.STM_VAR == null)
+                        {
+                            ctx.IO.ConsoleWrite("Warn", "  STM_VAR is null for stm_ref='" + stmRef + "'. Skipping.");
+                            loginfo.WriteLine("  WARNING: STM_VAR is null for stm_ref='" + stmRef + "'. Skipping.");
+                            totalSkipped++;
+                            continue;
+                        }
+
+                        // STM_NODES collection should always exist, but we check to be safe
+                        if (matchingProjectLink.STM_VAR.STM_NODES == null)
+                        {
+                            ctx.IO.ConsoleWrite("Warn", "  STM_NODES collection is null for stm_ref='" + stmRef + "'. Skipping.");
+                            loginfo.WriteLine("  WARNING: STM_NODES collection is null for stm_ref='" + stmRef + "'. Skipping.");
+                            totalSkipped++;
+                            continue;
+                        }
+
+                        // Check if this node already exists in STM_NODES
+                        var existingNode = matchingProjectLink.STM_VAR.STM_NODES
+                            .FirstOrDefault(n => n.node_ref != null && n.node_ref.Equals(nodeName, StringComparison.OrdinalIgnoreCase));
+
+                        if (existingNode != null)
+                        {
+                            // Update existing node
+                            string oldState = existingNode.state_ref;
+                            existingNode.state_ref = stateRef;
+                            existingNode.delay_degradation = "false";
+
+                            ctx.IO.ConsoleWrite("Info", "  Updated: " + nodeName + " in " + stmRef + ": " + oldState + " -> " + stateRef);
+                            loginfo.WriteLine("  UPDATED: node_ref='" + nodeName + "' in stm_ref='" + stmRef + "': state_ref changed from '" + oldState + "' to '" + stateRef + "'");
+                            totalUpdates++;
+                        }
+                        else
+                        {
+                            // Add new node
+                            var newNode = new DDB.STM_NODE
+                            {
+                                node_ref = nodeName,
+                                state_ref = stateRef,
+                                delay_degradation = "false"
+                            };
+
+                            matchingProjectLink.STM_VAR.STM_NODES.Add(newNode);
+
+                            ctx.IO.ConsoleWrite("Info", "  Added: " + nodeName + " to " + stmRef + " with state " + stateRef);
+                            loginfo.WriteLine("  ADDED: new STM_NODE with node_ref='" + nodeName + "', state_ref='" + stateRef + "' to stm_ref='" + stmRef + "'");
+                            totalAdded++;
+                        }
+
+                        // Save the modified STM_PROJECTLINK back to database
+                        bool success = stmPrjAH.ModifyAdd(matchingProjectLink);
+                        loginfo.WriteLine("  ModifyAdd operation returned: " + success.ToString());
+                    }
+
+                    loginfo.WriteLine("Completed processing for node: " + nodeName + "\n");
+                }
+
+                // Summary
+                ctx.IO.ConsoleWrite("Info", "==========================================");
+                ctx.IO.ConsoleWrite("Info", "STM Configuration Update Summary:");
+                ctx.IO.ConsoleWrite("Info", "  Total nodes updated: " + totalUpdates.ToString());
+                ctx.IO.ConsoleWrite("Info", "  Total nodes added: " + totalAdded.ToString());
+                ctx.IO.ConsoleWrite("Info", "  Total entries skipped: " + totalSkipped.ToString());
+                ctx.IO.ConsoleWrite("Info", "==========================================");
+
+                loginfo.WriteLine("\n==========================================");
+                loginfo.WriteLine("STM Configuration Update Summary:");
+                loginfo.WriteLine("  Total nodes updated: " + totalUpdates.ToString());
+                loginfo.WriteLine("  Total nodes added: " + totalAdded.ToString());
+                loginfo.WriteLine("  Total entries skipped: " + totalSkipped.ToString());
+                loginfo.WriteLine("==========================================");
+                loginfo.WriteLine("End of Diamant_Update_STMConfig Execution");
+                loginfo.WriteLine("NOTE: Changes persisted with --WRITESPLITTERS flag.");
+                
+                ctx.Succeed = true;
+            }
+            catch (Exception ex)
+            {
+                ctx.IO.ConsoleWrite("Error", "Plugin exception: " + ex.Message);
+                loginfo.WriteLine("\nERROR: Plugin exception: " + ex.Message);
+                loginfo.WriteLine("Stack trace: " + ex.StackTrace);
+                ctx.Succeed = false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Parses the input text file into a dictionary of node configurations.
+    /// Format:
+    /// Node name: Node_VoltageHandler1
+    /// Target states: ESPBase = EbdPumpless; AEB = Off; HHC = Off; HBA = Off
+    /// </summary>
+    private Dictionary<string, Dictionary<string, string>> ParseInputFile(string filePath, StreamWriter loginfo, DPP.IContext ctx)
+    {
+        var configurations = new Dictionary<string, Dictionary<string, string>>();
+        
+        try
+        {
+            string[] lines = File.ReadAllLines(filePath);
+            string currentNode = null;
+            
+            foreach (var rawLine in lines)
+            {
+                var line = rawLine.Trim();
+                
+                // Skip empty lines
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+                
+                // Parse "Node name:" line
+                if (line.StartsWith("Node name:", StringComparison.OrdinalIgnoreCase))
+                {
+                    currentNode = line.Substring("Node name:".Length).Trim();
+                    
+                    if (string.IsNullOrWhiteSpace(currentNode))
+                    {
+                        ctx.IO.ConsoleWrite("Warn", "Empty node name found in line: " + rawLine);
+                        loginfo.WriteLine("  WARNING: Empty node name found in line: " + rawLine);
+                        currentNode = null;
+                        continue;
+                    }
+                    
+                    // Initialize dictionary for this node if not exists
+                    if (!configurations.ContainsKey(currentNode))
+                    {
+                        configurations[currentNode] = new Dictionary<string, string>();
+                    }
+                    
+                    loginfo.WriteLine("Parsed node: " + currentNode);
+                }
+                // Parse "Target states:" line
+                else if (line.StartsWith("Target states:", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (string.IsNullOrEmpty(currentNode))
+                    {
+                        ctx.IO.ConsoleWrite("Warn", "Target states found without node name: " + rawLine);
+                        loginfo.WriteLine("  WARNING: Target states found without node name: " + rawLine);
+                        continue;
+                    }
+                    
+                    string statesString = line.Substring("Target states:".Length).Trim();
+                    
+                    if (string.IsNullOrWhiteSpace(statesString))
+                    {
+                        ctx.IO.ConsoleWrite("Warn", "Empty target states for node: " + currentNode);
+                        loginfo.WriteLine("  WARNING: Empty target states for node: " + currentNode);
+                        continue;
+                    }
+                    
+                    // Parse target states: "ESPBase = EbdPumpless; AEB = Off"
+                    var statePairs = statesString.Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries);
+                    
+                    foreach (var statePair in statePairs)
+                    {
+                        var parts = statePair.Split(new[] { '=' }, StringSplitOptions.RemoveEmptyEntries);
+                        
+                        if (parts.Length == 2)
+                        {
+                            string stmRef = parts[0].Trim();
+                            string stateRef = parts[1].Trim();
+                            
+                            if (!string.IsNullOrWhiteSpace(stmRef) && !string.IsNullOrWhiteSpace(stateRef))
+                            {
+                                configurations[currentNode][stmRef] = stateRef;
+                                loginfo.WriteLine("  Parsed target state: " + stmRef + " = " + stateRef);
+                            }
+                        }
+                        else
+                        {
+                            ctx.IO.ConsoleWrite("Warn", "Invalid state format: " + statePair);
+                            loginfo.WriteLine("  WARNING: Invalid state format: " + statePair);
+                        }
+                    }
+                }
+            }
+            
+            loginfo.WriteLine("\nTotal configurations parsed: " + configurations.Count.ToString());
+        }
+        catch (Exception ex)
+        {
+            ctx.IO.ConsoleWrite("Error", "Error parsing input file: " + ex.Message);
+            loginfo.WriteLine("ERROR parsing input file: " + ex.Message);
+            loginfo.WriteLine("Stack trace: " + ex.StackTrace);
+        }
+        
+        return configurations;
+    }
+}

@@ -1,0 +1,34 @@
+name: "2 · Prompt Regression Eval"
+
+# Runs the evaluation framework in validations/scripts/run-evals.ps1.
+# Triggers on any change to platform/ artifacts or the eval framework itself.
+# Can also be dispatched manually with a specific suite name.
+
+on:
+  pull_request:
+    paths:
+      - "platform/**"
+      - "validations/**"
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Evaluation suite to run (default: all)"
+        required: false
+        default: "all"
+
+jobs:
+  eval:
+    name: Run prompt evaluations
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run evaluations
+        shell: pwsh
+        run: |
+          $suite = '${{ github.event.inputs.suite }}'
+          if (-not $suite) { $suite = 'all' }
+          Write-Host "Running evaluation suite: $suite"
+          & ./validations/scripts/run-evals.ps1 -Suite $suite
